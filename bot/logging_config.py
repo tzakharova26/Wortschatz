@@ -52,6 +52,11 @@ def log_user_warning(logger: logging.Logger, user_id: int, message: str) -> None
 
 
 def log_user_error(
-    logger: logging.Logger, user_id: int, message: str, exc_info: bool = True
+    logger: logging.Logger,
+    user_id: int,
+    message: str,
+    exc_info: bool | BaseException = True,
 ) -> None:
+    """Log an error with traceback. exc_info can be an explicit exception or True
+    to use sys.exc_info() from the current except block."""
     logger.error(message, extra={"user_id": user_id}, exc_info=exc_info)

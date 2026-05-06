@@ -188,7 +188,8 @@ async def add_word(
         ),
     )
     await conn.commit()
-    log_user_action(logger, user_id, f"Added word: {german} ({part_of_speech})")
+    safe_german = "".join(ch if ch.isprintable() else "?" for ch in german.strip())[:100]
+    log_user_action(logger, user_id, f"Added word: {safe_german} ({part_of_speech})")
     return cursor.lastrowid
 
 
@@ -231,6 +232,16 @@ async def get_word_by_id(conn: aiosqlite.Connection, word_id: int, user_id: int)
     return dict(row) if row else None
 
 
+async def find_words_by_german(conn: aiosqlite.Connection, user_id: int, german: str) -> list[dict]:
+    """Find words by german text (case-insensitive)."""
+    cursor = await conn.execute(
+        "SELECT * FROM words WHERE user_id = ? AND LOWER(german) = LOWER(?)",
+        (user_id, german.strip()),
+    )
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
 async def get_tags(conn: aiosqlite.Connection, user_id: int) -> list[str]:
     cursor = await conn.execute(
         "SELECT DISTINCT tags FROM words WHERE user_id = ? AND tags != ''",
@@ -244,35 +255,6 @@ async def get_tags(conn: aiosqlite.Connection, user_id: int) -> list[str]:
             if t:
                 tag_set.add(t)
     return sorted(tag_set)
-
-
-async def add_tag_to_word(conn: aiosqlite.Connection, word_id: int, user_id: int, tag: str) -> None:
-    tag = tag.strip()
-    if not tag:
-        log_user_warning(logger, user_id, "Attempted to add empty tag")
-        return
-
-    cursor = await conn.execute(
-        "SELECT tags FROM words WHERE id = ? AND user_id = ?", (word_id, user_id)
-    )
-    row = await cursor.fetchone()
-    if not row:
-        log_user_warning(logger, user_id, f"Attempted to add tag to non-existent word id={word_id}")
-        return
-
-    existing = row["tags"]
-    existing_tags = [t.strip() for t in existing.split(",") if t.strip()]
-    if tag in existing_tags:
-        return
-
-    existing_tags.append(tag)
-    new_tags = ",".join(existing_tags)
-    await conn.execute(
-        "UPDATE words SET tags = ? WHERE id = ? AND user_id = ?",
-        (new_tags, word_id, user_id),
-    )
-    await conn.commit()
-    log_user_action(logger, user_id, f"Added tag '{tag}' to word id={word_id}")
 
 
 # --- Words by part of speech (for quiz options) ---
@@ -435,23 +417,42 @@ async def get_stats(conn: aiosqlite.Connection, user_id: int, since: datetime) -
     row = await cursor.fetchone()
     words_added = row["cnt"]
 
-    # Words learned: all applicable quiz types have correct_count >= 4
+    # Words learned IN PERIOD: count words that crossed the learned threshold during [since, now].
+    # A word is learned when all applicable quiz_types have >= 4 correct answers; the moment
+    # of becoming learned is the timestamp of the LAST such qualifying answer (across the
+    # quiz_types). Count those whose "learned at" timestamp falls within the period.
     cursor = await conn.execute(
-        """SELECT w.id, w.part_of_speech, w.irregular_forms,
-                  COUNT(s.id) as passed_types
+        """SELECT w.id, w.part_of_speech, w.irregular_forms
            FROM words w
-           JOIN sm2_state s ON w.id = s.word_id AND s.user_id = w.user_id
-                               AND s.correct_count >= 4
-           WHERE w.user_id = ? AND w.added_at >= ?
-           GROUP BY w.id""",
-        (user_id, since_str),
+           WHERE w.user_id = ?""",
+        (user_id,),
     )
-    rows = await cursor.fetchall()
+    candidate_rows = await cursor.fetchall()
     words_learned = 0
-    for r in rows:
+    for r in candidate_rows:
         word_dict = dict(r)
-        expected = len(get_quiz_types_for_word(word_dict))
-        if word_dict["passed_types"] >= expected:
+        applicable = get_quiz_types_for_word(word_dict)
+        # For each applicable quiz_type, find the timestamp of the 4th correct answer.
+        # If any quiz_type doesn't have 4 correct answers, the word isn't learned yet.
+        type_timestamps = []
+        all_done = True
+        for qt in applicable:
+            qt_cursor = await conn.execute(
+                """SELECT answered_at FROM quiz_history
+                   WHERE user_id = ? AND word_id = ? AND quiz_type = ? AND correct = 1
+                   ORDER BY answered_at LIMIT 1 OFFSET 3""",
+                (user_id, word_dict["id"], qt),
+            )
+            qt_row = await qt_cursor.fetchone()
+            if qt_row is None:
+                all_done = False
+                break
+            type_timestamps.append(qt_row[0])
+        if not all_done:
+            continue
+        # Word became learned at the latest of these "4th-correct" timestamps
+        learned_at = max(type_timestamps)
+        if learned_at >= since_str:
             words_learned += 1
 
     return {

@@ -6,9 +6,9 @@ import pytest
 
 from bot.database import (
     add_quiz_history,
-    add_tag_to_word,
     add_word,
     delete_word,
+    find_words_by_german,
     get_connection,
     get_due_words,
     get_quiz_types_for_word,
@@ -192,31 +192,6 @@ class TestTags:
         tags = await get_tags(db, USER_ID)
         assert tags == ["animals", "furniture"]
 
-    async def test_add_tag_to_word(self, db):
-        word_id = await add_word(db, USER_ID, "n", "Katze", "cat", tags="animals")
-        await add_tag_to_word(db, word_id, USER_ID, "A1")
-        word = await get_word_by_id(db, word_id, USER_ID)
-        assert "animals" in word["tags"]
-        assert "A1" in word["tags"]
-
-    async def test_add_duplicate_tag(self, db):
-        word_id = await add_word(db, USER_ID, "n", "Katze", "cat", tags="animals")
-        await add_tag_to_word(db, word_id, USER_ID, "animals")
-        word = await get_word_by_id(db, word_id, USER_ID)
-        assert word["tags"] == "animals"
-
-    async def test_add_tag_wrong_user(self, db):
-        word_id = await add_word(db, USER_ID, "n", "Katze", "cat", tags="animals")
-        await add_tag_to_word(db, word_id, 99999, "hacked")
-        word = await get_word_by_id(db, word_id, USER_ID)
-        assert word["tags"] == "animals"
-
-    async def test_add_empty_tag(self, db):
-        word_id = await add_word(db, USER_ID, "n", "Katze", "cat", tags="animals")
-        await add_tag_to_word(db, word_id, USER_ID, "  ")
-        word = await get_word_by_id(db, word_id, USER_ID)
-        assert word["tags"] == "animals"
-
     async def test_comma_separated_query(self, db):
         await add_word(db, USER_ID, "n", "Katze", "cat", tags="animals,A1")
         words = await get_words(db, USER_ID, tag="animals")
@@ -398,32 +373,16 @@ class TestStats:
         assert stats["words_added"] == 1
         assert stats["words_learned"] == 0
 
+    async def _mark_learned(self, db, word_id, quiz_types):
+        """Helper: add 4 correct quiz_history entries for each quiz_type."""
+        for qt in quiz_types:
+            for _ in range(4):
+                await add_quiz_history(db, USER_ID, word_id, qt, True)
+
     async def test_word_learned_all_types(self, db):
         """Adjective needs translate + multiple_choice both at 4 to be learned."""
         word_id = await add_word(db, USER_ID, "adj", "schnell", "fast")
-        now = datetime.now()
-        await upsert_sm2_state(
-            db,
-            USER_ID,
-            word_id,
-            "translate",
-            easiness_factor=2.5,
-            interval=30,
-            repetitions=5,
-            correct_count=4,
-            next_review=now,
-        )
-        await upsert_sm2_state(
-            db,
-            USER_ID,
-            word_id,
-            "multiple_choice",
-            easiness_factor=2.5,
-            interval=30,
-            repetitions=5,
-            correct_count=4,
-            next_review=now,
-        )
+        await self._mark_learned(db, word_id, ["translate", "multiple_choice"])
 
         since = datetime.now() - timedelta(days=1)
         stats = await get_stats(db, USER_ID, since)
@@ -432,18 +391,7 @@ class TestStats:
     async def test_word_not_learned_partial(self, db):
         """Adjective with only translate at 4 is NOT learned (missing multiple_choice)."""
         word_id = await add_word(db, USER_ID, "adj", "schnell", "fast")
-        now = datetime.now()
-        await upsert_sm2_state(
-            db,
-            USER_ID,
-            word_id,
-            "translate",
-            easiness_factor=2.5,
-            interval=30,
-            repetitions=5,
-            correct_count=4,
-            next_review=now,
-        )
+        await self._mark_learned(db, word_id, ["translate"])
 
         since = datetime.now() - timedelta(days=1)
         stats = await get_stats(db, USER_ID, since)
@@ -452,19 +400,7 @@ class TestStats:
     async def test_noun_learned_needs_article(self, db):
         """Noun needs translate + multiple_choice + article all at 4."""
         word_id = await add_word(db, USER_ID, "n", "Katze", "cat", article="die", plural="Katzen")
-        now = datetime.now()
-        for qt in ["translate", "multiple_choice", "article"]:
-            await upsert_sm2_state(
-                db,
-                USER_ID,
-                word_id,
-                qt,
-                easiness_factor=2.5,
-                interval=30,
-                repetitions=5,
-                correct_count=4,
-                next_review=now,
-            )
+        await self._mark_learned(db, word_id, ["translate", "multiple_choice", "article"])
 
         since = datetime.now() - timedelta(days=1)
         stats = await get_stats(db, USER_ID, since)
@@ -473,19 +409,7 @@ class TestStats:
     async def test_noun_not_learned_missing_article(self, db):
         """Noun with translate + multiple_choice at 4 but no article is NOT learned."""
         word_id = await add_word(db, USER_ID, "n", "Katze", "cat", article="die", plural="Katzen")
-        now = datetime.now()
-        for qt in ["translate", "multiple_choice"]:
-            await upsert_sm2_state(
-                db,
-                USER_ID,
-                word_id,
-                qt,
-                easiness_factor=2.5,
-                interval=30,
-                repetitions=5,
-                correct_count=4,
-                next_review=now,
-            )
+        await self._mark_learned(db, word_id, ["translate", "multiple_choice"])
 
         since = datetime.now() - timedelta(days=1)
         stats = await get_stats(db, USER_ID, since)
@@ -502,22 +426,32 @@ class TestStats:
             partizip_ii="ist gefahren",
             irregular_forms={"ich": "fahre", "du": "f\u00e4hrst", "er": "f\u00e4hrt"},
         )
-        now = datetime.now()
-        for qt in ["translate", "multiple_choice", "verb_forms"]:
-            await upsert_sm2_state(
-                db,
-                USER_ID,
-                word_id,
-                qt,
-                easiness_factor=2.5,
-                interval=30,
-                repetitions=5,
-                correct_count=4,
-                next_review=now,
-            )
+        await self._mark_learned(db, word_id, ["translate", "multiple_choice", "verb_forms"])
 
         since = datetime.now() - timedelta(days=1)
         stats = await get_stats(db, USER_ID, since)
+        assert stats["words_learned"] == 1
+
+    async def test_word_learned_old_not_in_period(self, db):
+        """Word that became learned BEFORE the period should not count."""
+        word_id = await add_word(db, USER_ID, "adj", "schnell", "fast")
+        await self._mark_learned(db, word_id, ["translate", "multiple_choice"])
+        # Backdate all quiz_history to 60 days ago
+        old_date = (datetime.now() - timedelta(days=60)).isoformat()
+        await db.execute(
+            "UPDATE quiz_history SET answered_at = ? WHERE user_id = ?",
+            (old_date, USER_ID),
+        )
+        await db.commit()
+
+        # Period is "last week" \u2014 should NOT count
+        since = datetime.now() - timedelta(days=7)
+        stats = await get_stats(db, USER_ID, since)
+        assert stats["words_learned"] == 0
+
+        # Period is "all time" \u2014 SHOULD count
+        epoch = datetime(1970, 1, 1)
+        stats = await get_stats(db, USER_ID, epoch)
         assert stats["words_learned"] == 1
 
 
@@ -638,3 +572,36 @@ class TestQuizTypesAdverb:
     def test_adverb(self):
         word = {"part_of_speech": "adv", "irregular_forms": None}
         assert get_quiz_types_for_word(word) == ["translate", "multiple_choice"]
+
+
+class TestFindWordsByGerman:
+    async def test_find_existing(self, db):
+        await add_word(db, USER_ID, "n", "Katze", "cat", article="die")
+        matches = await find_words_by_german(db, USER_ID, "Katze")
+        assert len(matches) == 1
+        assert matches[0]["german"] == "Katze"
+
+    async def test_case_insensitive(self, db):
+        await add_word(db, USER_ID, "n", "Katze", "cat", article="die")
+        matches = await find_words_by_german(db, USER_ID, "katze")
+        assert len(matches) == 1
+
+    async def test_not_found(self, db):
+        matches = await find_words_by_german(db, USER_ID, "Hund")
+        assert len(matches) == 0
+
+    async def test_multiple_matches(self, db):
+        await add_word(db, USER_ID, "n", "Bank", "bank (seat)", article="die")
+        await add_word(db, USER_ID, "n", "Bank", "bank (financial)", article="die")
+        matches = await find_words_by_german(db, USER_ID, "Bank")
+        assert len(matches) == 2
+
+    async def test_user_isolation(self, db):
+        await add_word(db, USER_ID, "adj", "schnell", "fast")
+        matches = await find_words_by_german(db, 99999, "schnell")
+        assert len(matches) == 0
+
+    async def test_strips_whitespace(self, db):
+        await add_word(db, USER_ID, "adj", "schnell", "fast")
+        matches = await find_words_by_german(db, USER_ID, "  schnell  ")
+        assert len(matches) == 1

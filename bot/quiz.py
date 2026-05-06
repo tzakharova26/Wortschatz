@@ -1,13 +1,28 @@
+import html
 import random
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from bot.config import QUIZ_TEMPERATURE, QUIZ_TYPE_WEIGHTS
-from bot.database import get_quiz_types_for_word, parse_irregular_forms
-from bot.logging_config import get_logger, log_user_action, log_user_warning
+from bot.database import (
+    add_quiz_history,
+    get_quiz_types_for_word,
+    get_sm2_state,
+    parse_irregular_forms,
+    upsert_sm2_state,
+)
+from bot.logging_config import get_logger, log_user_action, log_user_error, log_user_warning
+from bot.sm2 import calculate_sm2, sm2_from_db
 from bot.umlaut import answers_match
 
 logger = get_logger(__name__)
+
+
+def german_with_article(word: dict) -> str:
+    """Return 'article german' for nouns with articles, else just 'german'."""
+    if word.get("part_of_speech") == "n" and word.get("article"):
+        return f"{word['article']} {word['german']}"
+    return word["german"]
 
 
 @dataclass
@@ -25,7 +40,8 @@ class QuizSession:
     user_id: int
     questions: list[QuizQuestion]
     current_index: int = 0
-    results: list[tuple[int, bool]] = field(default_factory=list)
+    # results aligned with questions: None for misspell (skipped), (quality, correct) otherwise
+    results: list[tuple[int, bool] | None] = field(default_factory=list)
 
     @property
     def is_finished(self) -> bool:
@@ -47,6 +63,14 @@ class QuizSession:
         self.results.append((quality, correct))
         self.current_index += 1
 
+    def record_misspell(self) -> None:
+        """Record a misspell (skipped, no SM-2 update). Question is repeated at end."""
+        if self.is_finished:
+            log_user_warning(logger, self.user_id, "record_misspell called on finished session")
+            return
+        self.results.append(None)
+        self.current_index += 1
+
     def add_misspell_question(self, word: dict, all_words: list[dict]) -> None:
         """Re-add a word with a freshly selected quiz type at the end."""
         quiz_type = select_quiz_type(word)
@@ -55,9 +79,10 @@ class QuizSession:
 
     @property
     def score(self) -> tuple[int, int]:
-        """Return (correct_count, total)."""
-        correct = sum(1 for _, c in self.results if c)
-        return correct, len(self.results)
+        """Return (correct_count, total). Misspells are excluded from both counts."""
+        scored = [r for r in self.results if r is not None]
+        correct = sum(1 for _, c in scored if c)
+        return correct, len(scored)
 
 
 def _word_score(word: dict, now: datetime, temperature: float) -> float:
@@ -133,16 +158,12 @@ def generate_question(
 
 def _generate_translate(word: dict) -> QuizQuestion:
     """Translation -> German: show translation, user types German word."""
-    if word["part_of_speech"] == "n" and word.get("article"):
-        correct = f"{word['article']} {word['german']}"
-    else:
-        correct = word["german"]
     return QuizQuestion(
         word=word,
         quiz_type="translate",
         prompt=f"Translate to German: {word['translation']}",
         options=None,
-        correct_answer=correct,
+        correct_answer=german_with_article(word),
     )
 
 
@@ -170,14 +191,10 @@ def _generate_multiple_choice(word: dict, all_words: list[dict]) -> QuizQuestion
     options = [word["translation"]] + wrong_translations
     random.shuffle(options)
 
-    german_display = word["german"]
-    if word["part_of_speech"] == "n" and word.get("article"):
-        german_display = f"{word['article']} {word['german']}"
-
     return QuizQuestion(
         word=word,
         quiz_type="multiple_choice",
-        prompt=f"What does '{german_display}' mean?",
+        prompt=f"What does '{german_with_article(word)}' mean?",
         options=options,
         correct_answer=word["translation"],
     )
@@ -279,21 +296,62 @@ def check_answer(question: QuizQuestion, user_answer: str) -> bool:
 
 
 def format_summary(session: QuizSession) -> str:
-    """Format the end-of-quiz summary."""
+    """Format the end-of-quiz summary. HTML-safe."""
     correct, total = session.score
     lines = [f"Quiz complete! {correct}/{total} correct\n"]
     for i, question in enumerate(session.questions):
-        if i < len(session.results):
-            _, was_correct = session.results[i]
-            mark = "+" if was_correct else "-"
-            word = question.word
-            german = word["german"]
-            if word["part_of_speech"] == "n" and word.get("article"):
-                german = f"{word['article']} {german}"
-            if question.quiz_type == "verb_forms" and question.verb_form_key:
-                lines.append(
-                    f"{mark} {german} ({question.verb_form_key}) " f"— {question.correct_answer}"
-                )
-            else:
-                lines.append(f"{mark} {german} — {word['translation']}")
+        if i >= len(session.results):
+            break
+        result = session.results[i]
+        if result is None:
+            continue  # misspell, skipped
+        _, was_correct = result
+        mark = "+" if was_correct else "-"
+        word = question.word
+        german_safe = html.escape(german_with_article(word))
+        translation_safe = html.escape(word["translation"])
+        if question.quiz_type == "verb_forms" and question.verb_form_key:
+            answer_safe = html.escape(question.correct_answer)
+            form_safe = html.escape(question.verb_form_key)
+            lines.append(f"{mark} {german_safe} ({form_safe}) — {answer_safe}")
+        else:
+            lines.append(f"{mark} {german_safe} — {translation_safe}")
     return "\n".join(lines)
+
+
+async def apply_results(conn, session: QuizSession) -> int:
+    """Apply session results to SM-2 state and quiz history.
+
+    Skips misspells (None entries). Returns the number of questions whose update
+    failed; the caller decides how to surface that to the user.
+    """
+    user_id = session.user_id
+    failures = 0
+    for i, question in enumerate(session.questions):
+        if i >= len(session.results):
+            break
+        result = session.results[i]
+        if result is None:
+            continue
+        quality, correct = result
+        word_id = question.word["id"]
+        quiz_type = question.quiz_type
+        try:
+            row = await get_sm2_state(conn, user_id, word_id, quiz_type)
+            new_state = calculate_sm2(sm2_from_db(row, user_id), quality)
+            await upsert_sm2_state(
+                conn,
+                user_id,
+                word_id,
+                quiz_type,
+                new_state.easiness_factor,
+                new_state.interval,
+                new_state.repetitions,
+                new_state.correct_count,
+                new_state.next_review,
+            )
+            await add_quiz_history(conn, user_id, word_id, quiz_type, correct)
+        except Exception:
+            failures += 1
+            log_user_error(logger, user_id, f"Failed to apply quiz result for word_id={word_id}")
+    return failures

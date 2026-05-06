@@ -21,16 +21,20 @@ Wortschatz/
     database.py        # Database models and queries
     quiz.py            # Quiz logic, question generation
     sm2.py             # SM-2 spaced repetition algorithm
+    stats.py           # Statistics formatting
     umlaut.py          # Umlaut conversion utilities
+    config.py          # Quiz session size, temperature, weights, list cap, etc.
     logging_config.py  # Centralized logging setup
   tests/
     __init__.py
-    conftest.py        # Shared fixtures (in-memory DB, etc.)
+    conftest.py        # Shared fixtures (in-memory DB, fake update/context)
     test_database.py
     test_sm2.py
     test_quiz.py
     test_umlaut.py
     test_handlers.py
+    test_stats.py
+    test_main.py
     test_logging_config.py
   .env                 # BOT_TOKEN (not committed)
   .env.example         # Template for .env
@@ -71,12 +75,14 @@ v <infinitive> <partizip_ii> <translation>
 ```
 Example: `v machen hat gemacht to do`
 
-**Verbs -- irregular present (v):**
+**Verbs -- irregular present (vi):**
 ```
-v <infinitive> <partizip_ii> <ich> <du> <er/sie/es> <translation>
+vi <infinitive> <partizip_ii> <ich> <du> <er/sie/es> <translation>
 ```
-Example: `v fahren ist gefahren fahre faehrst faehrt to drive`
+Example: `vi fahren ist gefahren fahre faehrst faehrt to drive`
 Stored as JSON in `irregular_forms`: `{"ich": "fahre", "du": "fährst", "er": "fährt"}`
+
+The `vi` marker (instead of `v`) disambiguates irregular verbs from regular ones with multi-word translations like `v gehen ist gegangen to walk on foot`.
 
 **Adjectives (adj):**
 ```
@@ -91,7 +97,8 @@ adv <word> <translation>
 Example: `adv manchmal sometimes`
 
 ### Input Validation
-- `part_of_speech` must be one of: `n`, `v`, `adj`, `adv`
+- `part_of_speech` (input markers) is one of: `n`, `v`, `vi`, `adj`, `adv` (`vi` is parsed as irregular `v` and stored as `v`)
+- Stored `part_of_speech` is one of: `n`, `v`, `adj`, `adv`
 - `german` and `translation` cannot be empty or whitespace-only
 - All inputs are stripped of leading/trailing whitespace
 - Tags are normalized: whitespace stripped, empty segments removed
@@ -147,15 +154,21 @@ For each word, select quiz type using weighted random:
 - High temperature (1.0) = flatter distribution
 - Never-reviewed words get a high default days_since value
 
-### Self-Rating Buttons (Anki-style, 4 + misspell)
-After user answers and sees the correct answer, show rating buttons:
-- `Blackout (0)` -- no idea at all
-- `Wrong (1)` -- got it wrong but somewhat remembered
+### Self-Rating Buttons (Anki-style, 2 contextual + misspell)
+After user answers and sees the correct answer, show 3 rating buttons. The two quality
+buttons depend on whether the answer was correct:
+
+If the answer was **correct**:
 - `Good (4)` -- correct, normal effort
 - `Easy (5)` -- correct, effortless
-- `Misspell` -- knew the word but typo/spelling error; doesn't count, word re-added at end of session with freshly selected quiz type
+- `Misspell` -- knew the word but typo/spelling error; doesn't count, word re-added at end
 
-The quiz start message must explain these buttons to the user.
+If the answer was **wrong**:
+- `Blackout (0)` -- no idea at all
+- `Wrong (1)` -- got it wrong but somewhat remembered
+- `Misspell` -- knew the word but typo/spelling error; doesn't count, word re-added at end
+
+The quiz start message explains all five quality levels and the misspell behaviour.
 
 ### Session Flow
 1. `/quiz` or `/quiz #tag` -> generate QuizSession -> send start message with rating explanation -> send first question
@@ -178,9 +191,10 @@ class QuizQuestion:
 
 @dataclass
 class QuizSession:
+    user_id: int
     questions: list[QuizQuestion]
     current_index: int = 0
-    results: list[tuple[int, bool]]  # (quality_rating, was_correct)
+    results: list[tuple[int, bool] | None]  # (quality_rating, was_correct), or None for misspell
 ```
 
 ### SM-2 Spaced Repetition Algorithm
@@ -207,15 +221,13 @@ A word is considered **learned** when all applicable quiz types have been passed
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Welcome message with brief tutorial |
-| `/help` | List all commands with format examples |
-| `/add` | Interactive: add word cards (batch, one per line) |
-| `/list` | List all words |
-| `/list #tag` | List words filtered by tag |
+| `/start` | Welcome message + commands + rating system explanation |
+| `/help` | Interactive help with topic buttons (Commands / How to add / How quizzes work) |
+| `/add [tag]` | Interactive: add word cards (batch, one per line). Tag is an optional command argument. |
+| `/list <tag>` | List words filtered by tag. Tag is **required**; truncated to LIST_MAX_WORDS=40. |
 | `/tags` | List all existing tags |
-| `/delete <word>` | Delete a word card |
-| `/quiz` | Start a 7-question mixed quiz (SM-2 selection) |
-| `/quiz #tag` | Start a quiz within a specific tag |
+| `/delete <word>` | Delete a word card by its German text (umlaut-aware). Confirms via `/delete_confirm` if multiple matches. |
+| `/quiz [tag]` | Start a 7-question mixed quiz (SM-2 selection); optional tag filter |
 | `/stats` | Show learning statistics |
 
 ## Statistics (`/stats`)
@@ -321,7 +333,7 @@ The `data/` directory is mounted as a persistent Docker volume (`bot-data:/app/d
 - [x] Database layer with validation, logging, indexes
 - [x] Logging & error handling infrastructure
 - [x] SM-2 spaced repetition algorithm
-- [ ] Quiz logic (question generation, session management)
-- [ ] Telegram handlers (commands, ConversationHandler for /add and /quiz)
-- [ ] Main entry point
+- [x] Quiz logic (question generation, session management)
+- [x] Telegram handlers (commands, ConversationHandler for /add and /quiz)
+- [x] Main entry point
 - [ ] AI-powered features (context sentences, grammar tips, smart corrections)

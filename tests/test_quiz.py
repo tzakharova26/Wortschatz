@@ -476,7 +476,61 @@ class TestQuizSession:
         session.record_result(quality=4, correct=True)
         assert session.is_finished
         session.add_misspell_question(word, [word])
-        assert not session.is_finished  # new question added
+        assert not session.is_finished
+
+    def test_record_misspell_inserts_none(self):
+        q = QuizQuestion(
+            word=_make_word(),
+            quiz_type="translate",
+            prompt="p",
+            options=None,
+            correct_answer="die Katze",
+        )
+        session = QuizSession(user_id=12345, questions=[q])
+        session.record_misspell()
+        assert session.results == [None]
+        assert session.is_finished
+        assert session.score == (0, 0)  # misspell excluded
+
+    def test_misspell_mid_session_preserves_later_results(self):
+        """Regression: misspell should not break SM-2 update for subsequent questions."""
+        word = _make_word()
+        q1 = QuizQuestion(
+            word=_make_word(word_id=1),
+            quiz_type="translate",
+            prompt="p",
+            options=None,
+            correct_answer="die Katze",
+        )
+        q2 = QuizQuestion(
+            word=_make_word(word_id=2),
+            quiz_type="translate",
+            prompt="p",
+            options=None,
+            correct_answer="der Hund",
+        )
+        q3 = QuizQuestion(
+            word=_make_word(word_id=3),
+            quiz_type="translate",
+            prompt="p",
+            options=None,
+            correct_answer="das Auto",
+        )
+        session = QuizSession(user_id=12345, questions=[q1, q2, q3])
+
+        session.record_result(quality=4, correct=True)  # q1 done
+        session.add_misspell_question(word, [word])  # adds q4 at end
+        session.record_misspell()  # q2 marked misspell
+        session.record_result(quality=4, correct=True)  # q3 done
+
+        assert session.results == [(4, True), None, (4, True)]
+        assert session.score == (2, 2)
+        # q2's slot is None — not lost from results
+
+    def test_record_misspell_on_finished_is_noop(self):
+        session = QuizSession(user_id=12345, questions=[])
+        session.record_misspell()
+        assert session.results == []
 
 
 # --- Build session ---
@@ -631,3 +685,43 @@ class TestFormatSummary:
         session.record_result(quality=4, correct=True)
         summary = format_summary(session)
         assert "+ Katze" in summary
+
+    def test_summary_skips_misspell(self):
+        q1 = QuizQuestion(
+            word=_make_word(),
+            quiz_type="translate",
+            prompt="p",
+            options=None,
+            correct_answer="die Katze",
+        )
+        q2 = QuizQuestion(
+            word=_make_adj(),
+            quiz_type="translate",
+            prompt="p",
+            options=None,
+            correct_answer="schnell",
+        )
+        session = QuizSession(user_id=12345, questions=[q1, q2])
+        session.record_result(quality=4, correct=True)
+        session.record_misspell()
+        summary = format_summary(session)
+        assert "1/1 correct" in summary
+        assert "die Katze" in summary
+        assert "schnell" not in summary  # misspell line is skipped
+
+    def test_summary_html_escapes_user_content(self):
+        word = _make_word(german="<script>", translation="<b>cat</b>", article=None)
+        q = QuizQuestion(
+            word=word,
+            quiz_type="translate",
+            prompt="p",
+            options=None,
+            correct_answer="<script>",
+        )
+        session = QuizSession(user_id=12345, questions=[q])
+        session.record_result(quality=4, correct=True)
+        summary = format_summary(session)
+        assert "<script>" not in summary
+        assert "<b>cat</b>" not in summary
+        assert "&lt;script&gt;" in summary
+        assert "&lt;b&gt;cat&lt;/b&gt;" in summary
