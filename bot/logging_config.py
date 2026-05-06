@@ -31,12 +31,13 @@ def setup_logging() -> None:
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(formatter)
 
-    context_filter = UserContextFilter()
+    # Attach the filter to the handler (not the logger) so it also runs for
+    # records propagated from child loggers (e.g. python-telegram-bot internals).
+    file_handler.addFilter(UserContextFilter())
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
     root_logger.addHandler(file_handler)
-    root_logger.addFilter(context_filter)
 
 
 def get_logger(name: str) -> logging.Logger:

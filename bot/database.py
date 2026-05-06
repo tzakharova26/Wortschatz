@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 import aiosqlite
 
@@ -55,9 +55,20 @@ CREATE TABLE IF NOT EXISTS quiz_history (
 );
 
 CREATE INDEX IF NOT EXISTS idx_history_user_date ON quiz_history(user_id, answered_at);
+
+CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    hour INTEGER NOT NULL,
+    minute INTEGER NOT NULL,
+    timezone TEXT NOT NULL DEFAULT 'Europe/Berlin',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_reminders_user_id ON reminders(user_id);
 """
 
-VALID_PARTS_OF_SPEECH = {"n", "v", "adj", "adv"}
+VALID_PARTS_OF_SPEECH = {"n", "v", "adj", "adv", "prep"}
 VALID_QUIZ_TYPES = {"translate", "multiple_choice", "article", "verb_forms"}
 
 # Mapping: part_of_speech -> list of applicable quiz types
@@ -66,6 +77,7 @@ APPLICABLE_QUIZ_TYPES: dict[str, list[str]] = {
     "v": ["translate", "multiple_choice"],  # regular verbs
     "adj": ["translate", "multiple_choice"],
     "adv": ["translate", "multiple_choice"],
+    "prep": ["translate", "multiple_choice"],
 }
 
 # Irregular verbs (those with ich/du/er forms) also get "verb_forms"
@@ -242,6 +254,47 @@ async def find_words_by_german(conn: aiosqlite.Connection, user_id: int, german:
     return [dict(row) for row in rows]
 
 
+async def find_word_by_german_pos(
+    conn: aiosqlite.Connection, user_id: int, german: str, part_of_speech: str
+) -> dict | None:
+    """Find a single word by german text + POS (case-insensitive). Used by tag merge."""
+    cursor = await conn.execute(
+        """SELECT * FROM words
+           WHERE user_id = ? AND LOWER(german) = LOWER(?) AND part_of_speech = ?""",
+        (user_id, german.strip(), part_of_speech),
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def update_word_tags(
+    conn: aiosqlite.Connection, user_id: int, word_id: int, new_tags: str
+) -> None:
+    """Replace the tags column for a word. Caller is responsible for the merged value."""
+    await conn.execute(
+        "UPDATE words SET tags = ? WHERE id = ? AND user_id = ?",
+        (new_tags, word_id, user_id),
+    )
+    await conn.commit()
+    log_user_action(logger, user_id, f"Updated tags on word id={word_id}: '{new_tags}'")
+
+
+def merge_tag(existing_tags: str, new_tag: str) -> tuple[str, bool]:
+    """Add `new_tag` to the comma-separated `existing_tags`, dedup.
+
+    Returns (merged_tags, changed). `changed` is False if the tag was already present
+    or if `new_tag` is empty/whitespace.
+    """
+    new_tag = new_tag.strip()
+    if not new_tag:
+        return existing_tags, False
+    existing = [t.strip() for t in existing_tags.split(",") if t.strip()]
+    if new_tag in existing:
+        return existing_tags, False
+    existing.append(new_tag)
+    return ",".join(existing), True
+
+
 async def get_tags(conn: aiosqlite.Connection, user_id: int) -> list[str]:
     cursor = await conn.execute(
         "SELECT DISTINCT tags FROM words WHERE user_id = ? AND tags != ''",
@@ -398,8 +451,20 @@ async def add_quiz_history(
 
 
 async def get_stats(conn: aiosqlite.Connection, user_id: int, since: datetime) -> dict:
-    """Get statistics since a given date."""
-    since_str = since.isoformat()
+    """Get statistics since a given date.
+
+    `since` is interpreted as local time (matching `datetime.now()` callers); it is
+    converted to UTC for comparison against SQLite's CURRENT_TIMESTAMP values.
+    """
+    # SQLite CURRENT_TIMESTAMP returns UTC formatted as "YYYY-MM-DD HH:MM:SS".
+    # Match that format so string comparison aligns (T vs space ordering would otherwise
+    # break same-date comparisons).
+    if since.tzinfo is not None:
+        since_utc = since.astimezone(timezone.utc).replace(tzinfo=None)
+    else:
+        # Naive: treat as local, convert to UTC to match what the DB stores.
+        since_utc = since.astimezone(timezone.utc).replace(tzinfo=None)
+    since_str = since_utc.strftime("%Y-%m-%d %H:%M:%S")
 
     # Quizzes completed
     cursor = await conn.execute(
@@ -460,3 +525,64 @@ async def get_stats(conn: aiosqlite.Connection, user_id: int, since: datetime) -
         "words_added": words_added,
         "words_learned": words_learned,
     }
+
+
+# --- Reminders ---
+
+
+async def add_reminder(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    hour: int,
+    minute: int,
+    tz: str = "Europe/Berlin",
+) -> int:
+    """Insert a new reminder. Returns its id."""
+    if not (0 <= hour < 24):
+        raise ValueError(f"hour must be 0-23, got {hour}")
+    if not (0 <= minute < 60):
+        raise ValueError(f"minute must be 0-59, got {minute}")
+    cursor = await conn.execute(
+        "INSERT INTO reminders (user_id, hour, minute, timezone) VALUES (?, ?, ?, ?)",
+        (user_id, hour, minute, tz),
+    )
+    await conn.commit()
+    log_user_action(logger, user_id, f"Added reminder {hour:02d}:{minute:02d} {tz}")
+    return cursor.lastrowid
+
+
+async def get_reminders(conn: aiosqlite.Connection, user_id: int) -> list[dict]:
+    """Return all reminders for the given user, ordered by hour/minute."""
+    cursor = await conn.execute(
+        "SELECT * FROM reminders WHERE user_id = ? ORDER BY hour, minute",
+        (user_id,),
+    )
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def delete_reminder(conn: aiosqlite.Connection, user_id: int, reminder_id: int) -> bool:
+    cursor = await conn.execute(
+        "DELETE FROM reminders WHERE id = ? AND user_id = ?",
+        (reminder_id, user_id),
+    )
+    await conn.commit()
+    if cursor.rowcount > 0:
+        log_user_action(logger, user_id, f"Deleted reminder id={reminder_id}")
+        return True
+    log_user_warning(logger, user_id, f"Tried to delete non-existent reminder id={reminder_id}")
+    return False
+
+
+async def delete_all_reminders(conn: aiosqlite.Connection, user_id: int) -> int:
+    cursor = await conn.execute("DELETE FROM reminders WHERE user_id = ?", (user_id,))
+    await conn.commit()
+    log_user_action(logger, user_id, f"Deleted all reminders ({cursor.rowcount} rows)")
+    return cursor.rowcount
+
+
+async def get_all_reminders(conn: aiosqlite.Connection) -> list[dict]:
+    """Return reminders for all users — used at bot startup to repopulate JobQueue."""
+    cursor = await conn.execute("SELECT * FROM reminders")
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows]

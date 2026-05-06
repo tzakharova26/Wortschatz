@@ -572,6 +572,34 @@ class TestBuildQuizSession:
         session = build_quiz_session(user_id=12345, due_words=words, all_words=words, now=now)
         assert len(session.questions) == 1
 
+    def test_size_explicit_smaller_than_due(self):
+        words = [_make_word(word_id=i, german=f"w{i}", translation=f"t{i}") for i in range(5)]
+        session = build_quiz_session(user_id=12345, due_words=words, all_words=words, size=3)
+        assert len(session.questions) == 3
+
+    def test_size_larger_than_due_cycles(self):
+        """If due_words has 2 entries and size=5, words repeat to fill 5 questions."""
+        words = [
+            _make_word(word_id=1, german="Katze", translation="cat"),
+            _make_word(word_id=2, german="Hund", translation="dog"),
+        ]
+        session = build_quiz_session(user_id=12345, due_words=words, all_words=words, size=5)
+        assert len(session.questions) == 5
+        # Both words appear at least twice
+        word_ids = [q.word["id"] for q in session.questions]
+        assert word_ids.count(1) >= 2
+        assert word_ids.count(2) >= 2
+
+    def test_size_zero_returns_empty(self):
+        words = [_make_word()]
+        session = build_quiz_session(user_id=12345, due_words=words, all_words=words, size=0)
+        assert session.questions == []
+
+    def test_empty_due_with_size(self):
+        session = build_quiz_session(user_id=12345, due_words=[], all_words=[], size=5)
+        assert session.questions == []
+        assert session.is_finished
+
 
 # --- Format summary ---
 

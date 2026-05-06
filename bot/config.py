@@ -1,4 +1,5 @@
 QUIZ_SESSION_SIZE = 7
+QUIZ_MAX_SIZE = 50  # upper bound on user-requested quiz size
 QUIZ_TEMPERATURE = 0.3
 LIST_MAX_WORDS = 40
 

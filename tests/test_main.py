@@ -12,11 +12,13 @@ class TestPostInit:
         with (
             patch("bot.main.init_db", new_callable=AsyncMock) as init_mock,
             patch("bot.main.get_connection", new_callable=AsyncMock) as get_mock,
+            patch("bot.main.load_all_reminders", new_callable=AsyncMock) as load_mock,
         ):
             fake_conn = MagicMock()
             get_mock.return_value = fake_conn
             await post_init(app)
             init_mock.assert_awaited_once()
+            load_mock.assert_awaited_once()
             assert app.bot_data["db_conn"] is fake_conn
 
 

@@ -8,6 +8,7 @@ from bot.database import (
     add_quiz_history,
     add_word,
     delete_word,
+    find_word_by_german_pos,
     find_words_by_german,
     get_connection,
     get_due_words,
@@ -19,7 +20,9 @@ from bot.database import (
     get_words,
     get_words_by_pos,
     init_db,
+    merge_tag,
     parse_irregular_forms,
+    update_word_tags,
     upsert_sm2_state,
 )
 
@@ -573,6 +576,10 @@ class TestQuizTypesAdverb:
         word = {"part_of_speech": "adv", "irregular_forms": None}
         assert get_quiz_types_for_word(word) == ["translate", "multiple_choice"]
 
+    def test_preposition(self):
+        word = {"part_of_speech": "prep", "irregular_forms": None}
+        assert get_quiz_types_for_word(word) == ["translate", "multiple_choice"]
+
 
 class TestFindWordsByGerman:
     async def test_find_existing(self, db):
@@ -605,3 +612,73 @@ class TestFindWordsByGerman:
         await add_word(db, USER_ID, "adj", "schnell", "fast")
         matches = await find_words_by_german(db, USER_ID, "  schnell  ")
         assert len(matches) == 1
+
+
+class TestMergeTag:
+    def test_add_to_empty(self):
+        merged, changed = merge_tag("", "animals")
+        assert merged == "animals"
+        assert changed is True
+
+    def test_add_to_existing(self):
+        merged, changed = merge_tag("animals,A1", "B2")
+        assert merged == "animals,A1,B2"
+        assert changed is True
+
+    def test_duplicate_no_change(self):
+        merged, changed = merge_tag("animals,A1", "animals")
+        assert merged == "animals,A1"
+        assert changed is False
+
+    def test_empty_new_tag_no_change(self):
+        merged, changed = merge_tag("animals", "")
+        assert merged == "animals"
+        assert changed is False
+
+    def test_whitespace_only_no_change(self):
+        merged, changed = merge_tag("animals", "   ")
+        assert merged == "animals"
+        assert changed is False
+
+    def test_strips_new_tag(self):
+        merged, changed = merge_tag("animals", "  food  ")
+        assert merged == "animals,food"
+        assert changed is True
+
+
+class TestFindWordByGermanPos:
+    async def test_match_same_pos(self, db):
+        wid = await add_word(db, USER_ID, "n", "Bank", "seat", article="die")
+        await add_word(db, USER_ID, "n", "Hund", "dog", article="der")
+        match = await find_word_by_german_pos(db, USER_ID, "Bank", "n")
+        assert match is not None
+        assert match["id"] == wid
+
+    async def test_different_pos_not_match(self, db):
+        await add_word(db, USER_ID, "n", "laut", "noise", article="der")
+        match = await find_word_by_german_pos(db, USER_ID, "laut", "adj")
+        assert match is None
+
+    async def test_case_insensitive(self, db):
+        await add_word(db, USER_ID, "adj", "Schnell", "fast")
+        match = await find_word_by_german_pos(db, USER_ID, "schnell", "adj")
+        assert match is not None
+
+    async def test_user_isolation(self, db):
+        await add_word(db, USER_ID, "adj", "schnell", "fast")
+        match = await find_word_by_german_pos(db, 99999, "schnell", "adj")
+        assert match is None
+
+
+class TestUpdateWordTags:
+    async def test_replaces_tags(self, db):
+        wid = await add_word(db, USER_ID, "adj", "schnell", "fast", tags="old")
+        await update_word_tags(db, USER_ID, wid, "new1,new2")
+        word = await get_word_by_id(db, wid, USER_ID)
+        assert word["tags"] == "new1,new2"
+
+    async def test_user_isolation(self, db):
+        wid = await add_word(db, USER_ID, "adj", "schnell", "fast", tags="orig")
+        await update_word_tags(db, 99999, wid, "hacked")
+        word = await get_word_by_id(db, wid, USER_ID)
+        assert word["tags"] == "orig"

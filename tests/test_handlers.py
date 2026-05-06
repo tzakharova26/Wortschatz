@@ -66,6 +66,46 @@ class TestParseWordLine:
         assert word is None
         assert err is not None
 
+    def test_regular_verb_pipe(self):
+        word, err = _parse_word_line("v | machen | hat gemacht | to do something")
+        assert err is None
+        assert word["part_of_speech"] == "v"
+        assert word["german"] == "machen"
+        assert word["partizip_ii"] == "hat gemacht"
+        assert word["translation"] == "to do something"
+        assert word["irregular_forms"] is None
+
+    def test_regular_verb_pipe_single_partizip(self):
+        word, err = _parse_word_line("v | spielen | gespielt | to play")
+        assert err is None
+        assert word["partizip_ii"] == "gespielt"
+        assert word["translation"] == "to play"
+
+    def test_irregular_verb_pipe(self):
+        word, err = _parse_word_line(
+            "vi | fahren | ist gefahren | fahre | faehrst | faehrt | to drive a car"
+        )
+        assert err is None
+        assert word["part_of_speech"] == "v"
+        assert word["german"] == "fahren"
+        assert word["partizip_ii"] == "ist gefahren"
+        assert word["irregular_forms"] == {
+            "ich": "fahre",
+            "du": "fährst",
+            "er": "fährt",
+        }
+        assert word["translation"] == "to drive a car"
+
+    def test_regular_verb_pipe_too_few(self):
+        word, err = _parse_word_line("v | machen | hat gemacht")
+        assert word is None
+        assert err is not None and "v |" in err
+
+    def test_irregular_verb_pipe_too_few(self):
+        word, err = _parse_word_line("vi | fahren | ist gefahren | fahre | faehrst")
+        assert word is None
+        assert err is not None and "vi |" in err
+
     def test_adjective(self):
         word, err = _parse_word_line("adj schnell fast")
         assert err is None
@@ -77,6 +117,20 @@ class TestParseWordLine:
         word, err = _parse_word_line("adv manchmal sometimes")
         assert err is None
         assert word["part_of_speech"] == "adv"
+
+    def test_preposition(self):
+        word, err = _parse_word_line("prep mit with (+dat)")
+        assert err is None
+        assert word["part_of_speech"] == "prep"
+        assert word["german"] == "mit"
+        assert word["translation"] == "with (+dat)"
+
+    def test_preposition_pipe(self):
+        word, err = _parse_word_line("prep | wegen | because of (+gen)")
+        assert err is None
+        assert word["part_of_speech"] == "prep"
+        assert word["german"] == "wegen"
+        assert word["translation"] == "because of (+gen)"
 
     def test_empty_line(self):
         word, err = _parse_word_line("")
@@ -333,6 +387,44 @@ class TestParseWordLineHtmlEscaping:
         assert word is None
         assert "<script>" not in err
         assert "&lt;" in err
+
+
+class TestParseQuizArgs:
+    def test_no_args(self):
+        from bot.handlers import _parse_quiz_args
+
+        assert _parse_quiz_args([]) == (None, None)
+
+    def test_size_only(self):
+        from bot.handlers import _parse_quiz_args
+
+        assert _parse_quiz_args(["5"]) == (5, None)
+
+    def test_tag_only(self):
+        from bot.handlers import _parse_quiz_args
+
+        assert _parse_quiz_args(["animals"]) == (None, "animals")
+
+    def test_size_then_tag(self):
+        from bot.handlers import _parse_quiz_args
+
+        assert _parse_quiz_args(["5", "animals"]) == (5, "animals")
+
+    def test_tag_then_size(self):
+        from bot.handlers import _parse_quiz_args
+
+        assert _parse_quiz_args(["animals", "5"]) == (5, "animals")
+
+    def test_strips_hash(self):
+        from bot.handlers import _parse_quiz_args
+
+        assert _parse_quiz_args(["#animals"]) == (None, "animals")
+
+    def test_numeric_tag_eaten_as_size(self):
+        """A numeric-looking tag (e.g. '5' as a tag) is interpreted as size — known limitation."""
+        from bot.handlers import _parse_quiz_args
+
+        assert _parse_quiz_args(["5"]) == (5, None)
 
 
 class TestConstants:
@@ -645,15 +737,68 @@ class TestAddConversation:
         await add_start(upd, fake_context)
         assert fake_context.user_data["add_tag"] == "animals"
 
-    async def test_add_words_all_valid(self, fake_update, fake_context, db):
+    async def test_add_words_all_valid_shows_preview(self, fake_update, fake_context, db):
+        """All-valid input goes to preview (ADD_CONFIRM), no DB writes yet."""
         from bot.database import get_words
-        from bot.handlers import add_words_received
+        from bot.handlers import ADD_CONFIRM, add_words_received
 
         fake_context.user_data["add_tag"] = "animals"
         upd = fake_update(text="n die Katze Katzen cat\nadj schnell fast")
-        await add_words_received(upd, fake_context)
+        result = await add_words_received(upd, fake_context)
+        assert result == ADD_CONFIRM
+        text = upd.message.reply_text.call_args.args[0]
+        assert "Preview" in text
+        assert "/confirm" in text
+        # Nothing saved yet
+        assert len(await get_words(db, 12345)) == 0
+        assert len(fake_context.user_data["parsed_words"]) == 2
+
+    async def test_add_confirm_saves(self, fake_update, fake_context, db):
+        """/confirm after preview persists the parsed words."""
+        from bot.database import get_words
+        from bot.handlers import ConversationHandler, add_confirm
+
+        fake_context.user_data["add_tag"] = "animals"
+        fake_context.user_data["parsed_words"] = [
+            {
+                "part_of_speech": "adj",
+                "german": "schnell",
+                "translation": "fast",
+                "article": None,
+                "plural": None,
+                "partizip_ii": None,
+                "irregular_forms": None,
+            }
+        ]
+        upd = fake_update()
+        result = await add_confirm(upd, fake_context)
+        assert result == ConversationHandler.END
         words = await get_words(db, 12345)
-        assert len(words) == 2
+        assert len(words) == 1
+        assert words[0]["tags"] == "animals"
+
+    async def test_add_confirm_with_no_pending(self, fake_update, fake_context, db):
+        from bot.handlers import ConversationHandler, add_confirm
+
+        upd = fake_update()
+        result = await add_confirm(upd, fake_context)
+        assert result == ConversationHandler.END
+        text = upd.message.reply_text.call_args.args[0]
+        assert "Nothing to save" in text
+
+    async def test_add_words_replaces_preview(self, fake_update, fake_context, db):
+        """Sending more words while in ADD_CONFIRM replaces the previewed batch."""
+        from bot.handlers import ADD_CONFIRM, add_words_received
+
+        fake_context.user_data["add_tag"] = ""
+        fake_context.user_data["parsed_words"] = [{"old": True}]
+        upd = fake_update(text="adj schnell fast")
+        result = await add_words_received(upd, fake_context)
+        assert result == ADD_CONFIRM
+        # Previous parsed_words was replaced
+        parsed = fake_context.user_data["parsed_words"]
+        assert len(parsed) == 1
+        assert parsed[0]["german"] == "schnell"
 
     async def test_add_words_with_errors_stays_in_state(self, fake_update, fake_context, db):
         from bot.database import get_words
@@ -667,9 +812,10 @@ class TestAddConversation:
         # No DB writes yet — user must /skip or fix
         assert len(await get_words(db, 12345)) == 0
 
-    async def test_add_skip_saves_valid(self, fake_update, fake_context, db):
+    async def test_add_skip_shows_preview(self, fake_update, fake_context, db):
+        """/skip (after errors) shows preview of valid lines, doesn't save yet."""
         from bot.database import get_words
-        from bot.handlers import ConversationHandler, add_skip
+        from bot.handlers import ADD_CONFIRM, add_skip
 
         fake_context.user_data["add_tag"] = "test"
         fake_context.user_data["parsed_words"] = [
@@ -685,10 +831,96 @@ class TestAddConversation:
         ]
         upd = fake_update()
         result = await add_skip(upd, fake_context)
+        assert result == ADD_CONFIRM
+        text = upd.message.reply_text.call_args.args[0]
+        assert "Preview" in text
+        # Not yet saved
+        assert len(await get_words(db, 12345)) == 0
+
+    async def test_add_existing_word_with_new_tag_merges(self, fake_update, fake_context, db):
+        """Re-adding the same word with a new tag merges, not duplicates."""
+        from bot.database import add_word, get_words
+        from bot.handlers import ConversationHandler, add_confirm
+
+        # Existing word with tag "animals"
+        await add_word(db, 12345, "n", "Katze", "cat", article="die", tags="animals")
+
+        fake_context.user_data["add_tag"] = "A1"
+        fake_context.user_data["parsed_words"] = [
+            {
+                "part_of_speech": "n",
+                "german": "Katze",
+                "translation": "cat",
+                "article": "die",
+                "plural": "Katzen",
+                "partizip_ii": None,
+                "irregular_forms": None,
+            }
+        ]
+        upd = fake_update()
+        result = await add_confirm(upd, fake_context)
         assert result == ConversationHandler.END
+
+        # No duplicate row created; tags merged
         words = await get_words(db, 12345)
         assert len(words) == 1
-        assert words[0]["tags"] == "test"
+        assert words[0]["tags"] == "animals,A1"
+
+        text = upd.message.reply_text.call_args.args[0]
+        assert "Tag" in text and "#A1" in text
+
+    async def test_add_existing_word_same_tag_no_change(self, fake_update, fake_context, db):
+        from bot.database import add_word, get_words
+        from bot.handlers import add_confirm
+
+        await add_word(db, 12345, "adj", "schnell", "fast", tags="speed")
+
+        fake_context.user_data["add_tag"] = "speed"
+        fake_context.user_data["parsed_words"] = [
+            {
+                "part_of_speech": "adj",
+                "german": "schnell",
+                "translation": "fast",
+                "article": None,
+                "plural": None,
+                "partizip_ii": None,
+                "irregular_forms": None,
+            }
+        ]
+        upd = fake_update()
+        await add_confirm(upd, fake_context)
+
+        words = await get_words(db, 12345)
+        assert len(words) == 1
+        assert words[0]["tags"] == "speed"
+
+        text = upd.message.reply_text.call_args.args[0]
+        assert "Already existed" in text
+
+    async def test_homograph_different_pos_creates_new_row(self, fake_update, fake_context, db):
+        """'laut' as adj (loud) and as noun (sound) are different words."""
+        from bot.database import add_word, get_words
+        from bot.handlers import add_confirm
+
+        await add_word(db, 12345, "adj", "laut", "loud")
+
+        fake_context.user_data["add_tag"] = ""
+        fake_context.user_data["parsed_words"] = [
+            {
+                "part_of_speech": "n",
+                "german": "Laut",
+                "translation": "sound",
+                "article": "der",
+                "plural": "Laute",
+                "partizip_ii": None,
+                "irregular_forms": None,
+            }
+        ]
+        upd = fake_update()
+        await add_confirm(upd, fake_context)
+
+        words = await get_words(db, 12345)
+        assert len(words) == 2  # both adj and noun rows
 
     async def test_add_cancel(self, fake_update, fake_context):
         from bot.handlers import ConversationHandler, add_cancel
@@ -798,6 +1030,85 @@ class TestQuizConversation:
         assert fake_context.user_data["quiz_session"] != "stale-session"
         assert fake_context.user_data["quiz_all_words"] != [{"stale": True}]
 
+    async def test_quiz_size_arg(self, fake_update, fake_context, db):
+        """`/quiz 5` with 1 word in vocab cycles to 5 questions."""
+        from bot.database import add_word
+        from bot.handlers import quiz_start
+
+        await add_word(db, 12345, "adj", "schnell", "fast")
+        fake_context.args = ["5"]
+        upd = fake_update()
+        await quiz_start(upd, fake_context)
+        session = fake_context.user_data["quiz_session"]
+        assert len(session.questions) == 5
+
+    async def test_quiz_size_and_tag(self, fake_update, fake_context, db):
+        """`/quiz 3 animals` filters by tag and uses requested size."""
+        from bot.database import add_word
+        from bot.handlers import quiz_start
+
+        await add_word(db, 12345, "adj", "schnell", "fast", tags="animals")
+        await add_word(db, 12345, "adj", "langsam", "slow", tags="other")
+        fake_context.args = ["3", "animals"]
+        upd = fake_update()
+        await quiz_start(upd, fake_context)
+        session = fake_context.user_data["quiz_session"]
+        assert len(session.questions) == 3
+        # Only words tagged "animals" should appear
+        assert all(q.word["german"] == "schnell" for q in session.questions)
+
+    async def test_quiz_args_order_independent(self, fake_update, fake_context, db):
+        """`/quiz animals 3` parses the same as `/quiz 3 animals`."""
+        from bot.database import add_word
+        from bot.handlers import quiz_start
+
+        await add_word(db, 12345, "adj", "schnell", "fast", tags="animals")
+        fake_context.args = ["animals", "3"]
+        upd = fake_update()
+        await quiz_start(upd, fake_context)
+        session = fake_context.user_data["quiz_session"]
+        assert len(session.questions) == 3
+
+    async def test_quiz_size_capped(self, fake_update, fake_context, db):
+        """Requested size above QUIZ_MAX_SIZE is capped, with a notice in the start message."""
+        from bot.config import QUIZ_MAX_SIZE
+        from bot.database import add_word
+        from bot.handlers import quiz_start
+
+        await add_word(db, 12345, "adj", "schnell", "fast")
+        fake_context.args = [str(QUIZ_MAX_SIZE + 100)]
+        upd = fake_update()
+        await quiz_start(upd, fake_context)
+        session = fake_context.user_data["quiz_session"]
+        assert len(session.questions) == QUIZ_MAX_SIZE
+        # Start message should mention the cap
+        first_call_text = upd.message.reply_text.call_args_list[0].args[0]
+        assert "Capped" in first_call_text
+
+    async def test_quiz_zero_size_rejected(self, fake_update, fake_context, db):
+        from bot.database import add_word
+        from bot.handlers import ConversationHandler, quiz_start
+
+        await add_word(db, 12345, "adj", "schnell", "fast")
+        fake_context.args = ["0"]
+        upd = fake_update()
+        result = await quiz_start(upd, fake_context)
+        assert result == ConversationHandler.END
+        text = upd.message.reply_text.call_args.args[0]
+        assert "positive" in text.lower()
+
+    async def test_quiz_repeat_notice_when_vocab_smaller(self, fake_update, fake_context, db):
+        """Start message tells the user words will repeat when vocab < size."""
+        from bot.database import add_word
+        from bot.handlers import quiz_start
+
+        await add_word(db, 12345, "adj", "schnell", "fast")
+        fake_context.args = ["10"]
+        upd = fake_update()
+        await quiz_start(upd, fake_context)
+        first_call_text = upd.message.reply_text.call_args_list[0].args[0]
+        assert "repeat" in first_call_text.lower()
+
     async def test_text_answer_when_session_finished(self, fake_update, fake_context, db):
         from bot.handlers import ConversationHandler, quiz_text_answer
         from bot.quiz import QuizSession
@@ -844,6 +1155,114 @@ class TestQuizConversation:
         assert session.results == [None]
         # Session is not finished — there's still the appended question
         assert result == QUIZ_ANSWERING
+
+    async def test_button_answer_multiple_choice_correct(self, fake_update, fake_context, db):
+        """Tapping the correct multiple-choice option transitions to QUIZ_RATING."""
+        from bot.handlers import QUIZ_RATING, quiz_button_answer
+        from bot.quiz import QuizQuestion, QuizSession
+
+        word = {
+            "id": 1,
+            "part_of_speech": "n",
+            "german": "Katze",
+            "article": "die",
+            "plural": "Katzen",
+            "partizip_ii": None,
+            "irregular_forms": None,
+            "translation": "cat",
+            "tags": "",
+            "user_id": 12345,
+        }
+        q = QuizQuestion(
+            word=word,
+            quiz_type="multiple_choice",
+            prompt="What does 'die Katze' mean?",
+            options=["cat", "dog", "mouse", "bird"],
+            correct_answer="cat",
+        )
+        session = QuizSession(user_id=12345, questions=[q])
+        fake_context.user_data["quiz_session"] = session
+
+        upd = fake_update(callback_data="mc:cat")
+        result = await quiz_button_answer(upd, fake_context)
+        assert result == QUIZ_RATING
+        assert fake_context.user_data["last_answer_correct"] is True
+        # Edit text should mention "Correct"
+        text = upd.callback_query.edit_message_text.call_args.args[0]
+        assert "Correct" in text
+
+    async def test_button_answer_multiple_choice_wrong(self, fake_update, fake_context, db):
+        from bot.handlers import QUIZ_RATING, quiz_button_answer
+        from bot.quiz import QuizQuestion, QuizSession
+
+        word = {
+            "id": 1,
+            "part_of_speech": "n",
+            "german": "Katze",
+            "article": "die",
+            "plural": "Katzen",
+            "partizip_ii": None,
+            "irregular_forms": None,
+            "translation": "cat",
+            "tags": "",
+            "user_id": 12345,
+        }
+        q = QuizQuestion(
+            word=word,
+            quiz_type="multiple_choice",
+            prompt="What does 'die Katze' mean?",
+            options=["cat", "dog", "mouse", "bird"],
+            correct_answer="cat",
+        )
+        session = QuizSession(user_id=12345, questions=[q])
+        fake_context.user_data["quiz_session"] = session
+
+        upd = fake_update(callback_data="mc:dog")
+        result = await quiz_button_answer(upd, fake_context)
+        assert result == QUIZ_RATING
+        assert fake_context.user_data["last_answer_correct"] is False
+        text = upd.callback_query.edit_message_text.call_args.args[0]
+        assert "Wrong" in text
+
+    async def test_button_answer_article(self, fake_update, fake_context, db):
+        from bot.handlers import QUIZ_RATING, quiz_button_answer
+        from bot.quiz import QuizQuestion, QuizSession
+
+        word = {
+            "id": 1,
+            "part_of_speech": "n",
+            "german": "Katze",
+            "article": "die",
+            "plural": "Katzen",
+            "partizip_ii": None,
+            "irregular_forms": None,
+            "translation": "cat",
+            "tags": "",
+            "user_id": 12345,
+        }
+        q = QuizQuestion(
+            word=word,
+            quiz_type="article",
+            prompt="What is the article for 'Katze'?",
+            options=["der", "die", "das"],
+            correct_answer="die",
+        )
+        session = QuizSession(user_id=12345, questions=[q])
+        fake_context.user_data["quiz_session"] = session
+
+        upd = fake_update(callback_data="art:die")
+        result = await quiz_button_answer(upd, fake_context)
+        assert result == QUIZ_RATING
+        assert fake_context.user_data["last_answer_correct"] is True
+
+    async def test_button_answer_no_session(self, fake_update, fake_context, db):
+        from bot.handlers import ConversationHandler, quiz_button_answer
+
+        upd = fake_update(callback_data="mc:something")
+        result = await quiz_button_answer(upd, fake_context)
+        assert result == ConversationHandler.END
+        text = upd.callback_query.message.reply_text.call_args.args[0]
+        assert "No active quiz" in text
 
 
 class TestSaveWordsValueError:

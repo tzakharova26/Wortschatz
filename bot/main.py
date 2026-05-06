@@ -14,20 +14,25 @@ from bot.handlers import (
     help_callback,
     help_command,
     list_command,
+    reminders_command,
+    remindme_command,
+    remindoff_command,
     start_command,
     stats_command,
     tags_command,
 )
 from bot.logging_config import get_logger, setup_logging
+from bot.reminders import load_all_reminders
 
 logger = get_logger(__name__)
 
 
 async def post_init(application) -> None:
-    """Initialize DB and store connection in bot_data."""
+    """Initialize DB, store connection in bot_data, and re-schedule any stored reminders."""
     await init_db()
     conn = await get_connection()
     application.bot_data["db_conn"] = conn
+    await load_all_reminders(application, conn)
     logger.info("Bot started", extra={"user_id": "system"})
 
 
@@ -63,6 +68,9 @@ def main() -> None:
     app.add_handler(CommandHandler("delete", delete_command))
     app.add_handler(CommandHandler("delete_confirm", delete_confirm_command))
     app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("remindme", remindme_command))
+    app.add_handler(CommandHandler("reminders", reminders_command))
+    app.add_handler(CommandHandler("remindoff", remindoff_command))
 
     # Help callback buttons
     app.add_handler(CallbackQueryHandler(help_callback, pattern=f"^{CB_HELP}"))

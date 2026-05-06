@@ -257,18 +257,31 @@ def build_quiz_session(
     user_id: int,
     due_words: list[dict],
     all_words: list[dict],
+    size: int | None = None,
     now: datetime | None = None,
     temperature: float = QUIZ_TEMPERATURE,
 ) -> QuizSession:
-    """Build a complete quiz session from due words."""
+    """Build a quiz session of `size` questions.
+
+    If size is None, defaults to len(due_words). If due_words has fewer items than
+    size, words cycle to fill the session — each repetition gets a freshly weighted
+    quiz type, so the same word can show up under different quiz types.
+    """
     if now is None:
         now = datetime.now()
 
+    if not due_words:
+        log_user_action(logger, user_id, "Quiz session created: 0 questions (no due words)")
+        return QuizSession(user_id=user_id, questions=[])
+
+    if size is None:
+        size = len(due_words)
+
     questions = []
-    for word in due_words:
+    for i in range(size):
+        word = due_words[i % len(due_words)]
         quiz_type = select_quiz_type(word, temperature=temperature, now=now)
-        question = generate_question(word, quiz_type, all_words)
-        questions.append(question)
+        questions.append(generate_question(word, quiz_type, all_words))
 
     quiz_types_used = [q.quiz_type for q in questions]
     log_user_action(

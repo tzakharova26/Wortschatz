@@ -96,9 +96,22 @@ adv <word> <translation>
 ```
 Example: `adv manchmal sometimes`
 
+**Prepositions (prep):**
+```
+prep <word> <translation>
+```
+Example: `prep mit with (+dat)` — case info goes in the translation field.
+
+### Field Separator
+Each `/add` line can use **spaces** or **`|` (pipe)** as field separators (auto-detected per line). Pipe is recommended when translations contain spaces or for readability:
+```
+n | die Katze | Katzen | a small cat
+vi | fahren | ist gefahren | fahre | faehrst | faehrt | to drive
+```
+
 ### Input Validation
-- `part_of_speech` (input markers) is one of: `n`, `v`, `vi`, `adj`, `adv` (`vi` is parsed as irregular `v` and stored as `v`)
-- Stored `part_of_speech` is one of: `n`, `v`, `adj`, `adv`
+- `part_of_speech` (input markers) is one of: `n`, `v`, `vi`, `adj`, `adv`, `prep` (`vi` is parsed as irregular `v` and stored as `v`)
+- Stored `part_of_speech` is one of: `n`, `v`, `adj`, `adv`, `prep`
 - `german` and `translation` cannot be empty or whitespace-only
 - All inputs are stripped of leading/trailing whitespace
 - Tags are normalized: whitespace stripped, empty segments removed
@@ -227,8 +240,11 @@ A word is considered **learned** when all applicable quiz types have been passed
 | `/list <tag>` | List words filtered by tag. Tag is **required**; truncated to LIST_MAX_WORDS=40. |
 | `/tags` | List all existing tags |
 | `/delete <word>` | Delete a word card by its German text (umlaut-aware). Confirms via `/delete_confirm` if multiple matches. |
-| `/quiz [tag]` | Start a 7-question mixed quiz (SM-2 selection); optional tag filter |
-| `/stats` | Show learning statistics |
+| `/quiz [N] [tag]` | Start a quiz: `N` questions (default 7, capped at QUIZ_MAX_SIZE=50), optional tag filter. Args order-independent. If due words < N, the session cycles through them with new quiz types. |
+| `/stats` | Show learning statistics (today / week / month / overall) |
+| `/remindme HH:MM [tz]` | Add a daily quiz reminder. Default timezone is `Europe/Berlin`. Multiple reminders per user supported. |
+| `/reminders` | List user's reminders with each one's source time and Berlin/Moscow equivalents. |
+| `/remindoff <id\|all>` | Remove a specific reminder (by id) or all of them. |
 
 ## Statistics (`/stats`)
 - **Today / This week / This month:**
@@ -285,7 +301,28 @@ CREATE TABLE quiz_history (
 );
 
 CREATE INDEX idx_history_user_date ON quiz_history(user_id, answered_at);
+
+CREATE TABLE reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    hour INTEGER NOT NULL,                    -- 0-23
+    minute INTEGER NOT NULL,                  -- 0-59
+    timezone TEXT NOT NULL DEFAULT 'Europe/Berlin',  -- IANA name
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_reminders_user_id ON reminders(user_id);
 ```
+
+## Reminders
+- Multiple reminders per user (no UNIQUE constraint)
+- Stored timezone is an IANA name; validated via `zoneinfo.ZoneInfo`
+- Default timezone is `Europe/Berlin` when user omits it
+- Daily firing handled by python-telegram-bot's `JobQueue` (requires `[job-queue]` extra → APScheduler)
+- Each job is named `reminder_{id}` so it can be individually cancelled
+- On every bot startup, `load_all_reminders` repopulates the JobQueue from the DB (jobs are in-memory only)
+- Reminder messages: "Time to practice German! Send /quiz to start." Send failures (e.g., user blocked the bot) are caught and logged; the DB row is preserved so reminders resume if the user unblocks.
+- `/reminders` displays both Berlin and Moscow times for each entry, regardless of source TZ; uses today's date as DST reference
 
 ## Development
 ```bash
@@ -336,4 +373,10 @@ The `data/` directory is mounted as a persistent Docker volume (`bot-data:/app/d
 - [x] Quiz logic (question generation, session management)
 - [x] Telegram handlers (commands, ConversationHandler for /add and /quiz)
 - [x] Main entry point
+- [x] Pipe `|` separator for `/add`
+- [x] Preview-and-confirm flow for `/add` (`ADD_CONFIRM` state, `/confirm`)
+- [x] Tag merging on duplicate-word add
+- [x] Preposition POS (`prep`)
+- [x] Configurable quiz size (`/quiz [N] [tag]`) with cycling for small vocabularies
+- [x] Daily reminders with multi-timezone support (`/remindme`, `/reminders`, `/remindoff`)
 - [ ] AI-powered features (context sentences, grammar tips, smart corrections)

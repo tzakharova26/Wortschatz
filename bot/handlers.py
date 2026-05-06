@@ -16,18 +16,26 @@ from bot.config import (
     QUALITY_EASY,
     QUALITY_GOOD,
     QUALITY_WRONG,
+    QUIZ_MAX_SIZE,
     QUIZ_SESSION_SIZE,
     QUIZ_START_MESSAGE,
 )
 from bot.database import (
+    add_reminder,
     add_word,
+    delete_all_reminders,
+    delete_reminder,
     delete_word,
+    find_word_by_german_pos,
     find_words_by_german,
     get_due_words,
+    get_reminders,
     get_tags,
     get_words,
     get_words_by_pos,
+    merge_tag,
     parse_irregular_forms,
+    update_word_tags,
 )
 from bot.logging_config import get_logger, log_user_action, log_user_error, log_user_warning
 from bot.quiz import (
@@ -36,13 +44,20 @@ from bot.quiz import (
     check_answer,
     format_summary,
 )
+from bot.reminders import (
+    DEFAULT_TZ,
+    cancel_reminder,
+    format_in_zones,
+    schedule_reminder,
+    validate_timezone,
+)
 from bot.stats import get_user_stats
 from bot.umlaut import convert_umlauts
 
 logger = get_logger(__name__)
 
 # ConversationHandler states
-ADD_WORDS, QUIZ_ANSWERING, QUIZ_RATING = range(3)
+ADD_WORDS, ADD_CONFIRM, QUIZ_ANSWERING, QUIZ_RATING = range(4)
 
 # Callback data prefixes
 CB_HELP = "help:"
@@ -51,18 +66,23 @@ CB_ART = "art:"
 CB_RATE = "rate:"
 
 ADD_FORMAT_MESSAGE = (
-    "Send words, one per line. Formats:\n\n"
+    "Send words, one per line. Fields can be separated by spaces or by | (pipe).\n\n"
     "<code>n article word plural translation</code>\n"
-    "Example: <code>n die Katze Katzen cat</code>\n\n"
+    "Example: <code>n die Katze Katzen cat</code>\n"
+    "Or:      <code>n | die | Katze | Katzen | small cat</code>\n\n"
     "<code>v infinitive partizip_ii translation</code>  (regular)\n"
-    "Example: <code>v machen hat gemacht to do</code>\n\n"
+    "Example: <code>v machen hat gemacht to do</code>\n"
+    "Or:      <code>v | machen | hat gemacht | to do something</code>\n\n"
     "<code>vi infinitive partizip_ii ich du er translation</code>  (irregular)\n"
-    "Example: <code>vi fahren ist gefahren fahre faehrst faehrt to drive</code>\n\n"
+    "Example: <code>vi fahren ist gefahren fahre faehrst faehrt to drive</code>\n"
+    "Or:      <code>vi | fahren | ist gefahren | fahre | faehrst | faehrt | to drive</code>\n\n"
     "<code>adj word translation</code>\n"
     "Example: <code>adj schnell fast</code>\n\n"
     "<code>adv word translation</code>\n"
     "Example: <code>adv manchmal sometimes</code>\n\n"
-    "Send /cancel to abort."
+    "<code>prep word translation</code>  (case info goes in translation)\n"
+    "Example: <code>prep mit with (+dat)</code>\n\n"
+    "After parsing, you'll see a preview — send /confirm to save or /cancel to abort."
 )
 
 COMMANDS_HELP = (
@@ -71,9 +91,13 @@ COMMANDS_HELP = (
     "/list tag — list words filtered by tag\n"
     "/tags — show all your tags\n"
     "/delete word — delete a word by its German text\n"
-    "/quiz [tag] — start a 7-question quiz\n"
+    "/quiz [N] [tag] — start a quiz (N questions, default 7; words repeat if vocab is small)\n"
     "/stats — show learning statistics\n"
+    "/remindme HH:MM [tz] — add a daily practice reminder (default Europe/Berlin)\n"
+    "/reminders — list your reminders (Berlin/Moscow times)\n"
+    "/remindoff <id|all> — remove a reminder\n"
     "/help — interactive help menu\n"
+    "/confirm — confirm preview during /add\n"
     "/cancel — cancel current operation"
 )
 
@@ -121,23 +145,30 @@ def _format_word_tables(words: list[dict]) -> str:
         groups.setdefault(pos, []).append(w)
 
     lines = []
-    pos_labels = {"n": "Nouns", "v": "Verbs", "adj": "Adjectives", "adv": "Adverbs"}
+    pos_labels = {
+        "n": "Nouns",
+        "v": "Verbs",
+        "adj": "Adjectives",
+        "adv": "Adverbs",
+        "prep": "Prepositions",
+    }
 
     def esc(s) -> str:
         return html.escape(str(s)) if s is not None else ""
 
-    for pos in ["n", "v", "adj", "adv"]:
+    for pos in ["n", "v", "adj", "adv", "prep"]:
         if pos not in groups:
             continue
         lines.append(f"\n<b>{pos_labels.get(pos, pos)}:</b>")
         for w in groups[pos]:
-            wid = w["id"]
+            wid = w.get("id")
+            id_prefix = f"[{wid}] " if wid is not None else ""
             german = esc(w["german"])
             translation = esc(w["translation"])
             if pos == "n":
                 article = esc(w.get("article")) or "?"
                 plural = esc(w.get("plural")) or "—"
-                lines.append(f"  [{wid}] {article} {german} (pl: {plural}) — {translation}")
+                lines.append(f"  {id_prefix}{article} {german} (pl: {plural}) — {translation}")
             elif pos == "v":
                 partizip = esc(w.get("partizip_ii")) or "—"
                 forms_str = ""
@@ -145,9 +176,9 @@ def _format_word_tables(words: list[dict]) -> str:
                 if forms:
                     form_parts = [f"{esc(k)}: {esc(v)}" for k, v in forms.items()]
                     forms_str = f" ({', '.join(form_parts)})"
-                lines.append(f"  [{wid}] {german} [{partizip}]{forms_str} — {translation}")
+                lines.append(f"  {id_prefix}{german} [{partizip}]{forms_str} — {translation}")
             else:
-                lines.append(f"  [{wid}] {german} — {translation}")
+                lines.append(f"  {id_prefix}{german} — {translation}")
 
     return "\n".join(lines)
 
@@ -167,42 +198,67 @@ def _parse_noun_line(parts: list[str], safe_line: str) -> tuple[dict | None, str
 
 
 def _parse_verb_line(
-    parts: list[str], is_irregular: bool, safe_line: str
+    parts: list[str], is_irregular: bool, safe_line: str, is_pipe: bool
 ) -> tuple[dict | None, str | None]:
     label = "vi" if is_irregular else "v"
-    min_required = 7 if is_irregular else 4
-    if len(parts) < min_required:
-        if is_irregular:
+
+    if is_pipe:
+        # With pipe, partizip_ii is always one field (may contain "ist gefahren" inside)
+        min_fields = 7 if is_irregular else 4
+        if len(parts) < min_fields:
+            if is_irregular:
+                return None, (
+                    "vi needs: vi | infinitive | partizip_ii | ich | du | er | translation: "
+                    f"<code>{safe_line}</code>"
+                )
             return None, (
-                "vi needs: vi infinitive partizip_ii ich du er translation: "
-                f"<code>{safe_line}</code>"
+                f"v needs: v | infinitive | partizip_ii | translation: <code>{safe_line}</code>"
             )
-        return None, f"v needs: v infinitive partizip_ii translation: <code>{safe_line}</code>"
-
-    # partizip_ii is "ist X" / "hat X" (2 tokens) or a single token
-    if parts[2] in ("ist", "hat"):
-        if len(parts) < min_required + 1:
-            return None, f"{label} with ist/hat needs more fields: <code>{safe_line}</code>"
-        partizip_ii = f"{parts[2]} {convert_umlauts(parts[3])}"
-        remaining = parts[4:]
+        partizip_ii = " ".join(convert_umlauts(t) for t in parts[2].split())
+        if is_irregular:
+            irregular_forms = {
+                "ich": convert_umlauts(parts[3]),
+                "du": convert_umlauts(parts[4]),
+                "er": convert_umlauts(parts[5]),
+            }
+            translation = " ".join(parts[6:])
+        else:
+            irregular_forms = None
+            translation = " ".join(parts[3:])
     else:
-        partizip_ii = convert_umlauts(parts[2])
-        remaining = parts[3:]
+        min_required = 7 if is_irregular else 4
+        if len(parts) < min_required:
+            if is_irregular:
+                return None, (
+                    "vi needs: vi infinitive partizip_ii ich du er translation: "
+                    f"<code>{safe_line}</code>"
+                )
+            return None, f"v needs: v infinitive partizip_ii translation: <code>{safe_line}</code>"
 
-    if is_irregular:
-        if len(remaining) < 4:
-            return None, f"vi needs ich, du, er, translation: <code>{safe_line}</code>"
-        irregular_forms = {
-            "ich": convert_umlauts(remaining[0]),
-            "du": convert_umlauts(remaining[1]),
-            "er": convert_umlauts(remaining[2]),
-        }
-        translation = " ".join(remaining[3:])
-    else:
-        if not remaining:
-            return None, f"v missing translation: <code>{safe_line}</code>"
-        irregular_forms = None
-        translation = " ".join(remaining)
+        # partizip_ii is "ist X" / "hat X" (2 tokens) or a single token
+        if parts[2] in ("ist", "hat"):
+            if len(parts) < min_required + 1:
+                return None, f"{label} with ist/hat needs more fields: <code>{safe_line}</code>"
+            partizip_ii = f"{parts[2]} {convert_umlauts(parts[3])}"
+            remaining = parts[4:]
+        else:
+            partizip_ii = convert_umlauts(parts[2])
+            remaining = parts[3:]
+
+        if is_irregular:
+            if len(remaining) < 4:
+                return None, f"vi needs ich, du, er, translation: <code>{safe_line}</code>"
+            irregular_forms = {
+                "ich": convert_umlauts(remaining[0]),
+                "du": convert_umlauts(remaining[1]),
+                "er": convert_umlauts(remaining[2]),
+            }
+            translation = " ".join(remaining[3:])
+        else:
+            if not remaining:
+                return None, f"v missing translation: <code>{safe_line}</code>"
+            irregular_forms = None
+            translation = " ".join(remaining)
 
     return {
         "part_of_speech": "v",
@@ -235,21 +291,28 @@ def _parse_simple_line(
 def _parse_word_line(line: str) -> tuple[dict | None, str | None]:
     """Parse a single word line. Returns (word_dict, error_message).
 
-    Formats:
+    Two separator styles are supported per line, auto-detected:
+      - Space-separated (positional, current default)
+      - Pipe-separated: each "|" delimits a semantic field; fields may contain spaces
+
+    Formats (space form shown; replace spaces between fields with " | " for pipe):
       n <article> <word> <plural> <translation...>
       v <infinitive> <partizip_ii> <translation...>                       (regular)
       vi <infinitive> <partizip_ii> <ich> <du> <er> <translation...>      (irregular)
       adj <word> <translation...>
       adv <word> <translation...>
-
-    partizip_ii may be 1 word ("gespielt") or 2 words starting with "ist"/"hat".
     """
     line = line.strip()
     if not line:
         return None, None
 
-    parts = line.split()
     safe_line = html.escape(line)
+    is_pipe = "|" in line
+    if is_pipe:
+        parts = [p.strip() for p in line.split("|") if p.strip()]
+    else:
+        parts = line.split()
+
     if len(parts) < 3:
         return None, f"Too few fields: <code>{safe_line}</code>"
 
@@ -257,8 +320,10 @@ def _parse_word_line(line: str) -> tuple[dict | None, str | None]:
     if pos == "n":
         return _parse_noun_line(parts, safe_line)
     if pos in ("v", "vi"):
-        return _parse_verb_line(parts, is_irregular=(pos == "vi"), safe_line=safe_line)
-    if pos in ("adj", "adv"):
+        return _parse_verb_line(
+            parts, is_irregular=(pos == "vi"), safe_line=safe_line, is_pipe=is_pipe
+        )
+    if pos in ("adj", "adv", "prep"):
         return _parse_simple_line(pos, parts, safe_line)
 
     safe_pos = html.escape(pos)
@@ -300,11 +365,18 @@ async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     elif topic == "quiz":
         text = (
             "<b>How quizzes work:</b>\n\n"
-            "A quiz has 7 questions with mixed types:\n"
+            "Use <code>/quiz [N] [tag]</code> — both args optional.\n"
+            "  <code>/quiz</code> — 7 mixed questions on most-due words\n"
+            "  <code>/quiz 20</code> — 20 questions\n"
+            "  <code>/quiz animals</code> — filter by tag\n"
+            "  <code>/quiz 10 animals</code> — combine\n\n"
+            "If your vocabulary is smaller than the requested size, words repeat "
+            "with new quiz types each round.\n\n"
+            "Question types (mixed within a session):\n"
             "- Translate: type the German word\n"
             "- Multiple choice: pick the translation\n"
-            "- Article: pick der/die/das (nouns)\n"
-            "- Verb forms: type the asked form (irregular verbs)\n\n" + QUIZ_START_MESSAGE
+            "- Article: pick der/die/das (nouns only)\n"
+            "- Verb forms: type the asked form (irregular verbs only)\n\n" + QUIZ_START_MESSAGE
         )
     else:
         text = "Unknown topic."
@@ -416,6 +488,120 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(text, parse_mode="HTML")
 
 
+# --- Reminders ---
+
+
+def _parse_remindme_args(args: list[str]) -> tuple[int, int, str] | str:
+    """Parse `/remindme HH:MM [tz]` args. Returns (hour, minute, tz) or an error string."""
+    if not args:
+        return "Usage: /remindme HH:MM [timezone]\nExample: /remindme 09:00 Europe/Berlin"
+    time_str = args[0]
+    if ":" not in time_str:
+        return "Time must be in HH:MM format (e.g. 09:00)."
+    hh, _, mm = time_str.partition(":")
+    if not (hh.isdigit() and mm.isdigit()):
+        return "Time must be in HH:MM format (e.g. 09:00)."
+    hour, minute = int(hh), int(mm)
+    if not (0 <= hour < 24 and 0 <= minute < 60):
+        return "Hour must be 0-23 and minute 0-59."
+    tz = " ".join(args[1:]).strip() if len(args) > 1 else DEFAULT_TZ
+    if not validate_timezone(tz):
+        return f"Unknown timezone '{html.escape(tz)}'. Use IANA names like 'Europe/Berlin'."
+    return hour, minute, tz
+
+
+def _format_reminder_line(r: dict) -> str:
+    """Render a single reminder with Berlin/Moscow times."""
+    zones = format_in_zones(r["hour"], r["minute"], r["timezone"])
+    src_label = html.escape(r["timezone"])
+    src_time = f"{r['hour']:02d}:{r['minute']:02d}"
+    return (
+        f"  #{r['id']} — {src_time} {src_label} "
+        f"(Berlin {zones['Europe/Berlin']}, Moscow {zones['Europe/Moscow']})"
+    )
+
+
+async def remindme_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    log_user_action(logger, user_id, f"/remindme {_safe_log(' '.join(context.args or []))}")
+    conn = _get_conn(context)
+
+    parsed = _parse_remindme_args(context.args or [])
+    if isinstance(parsed, str):
+        await update.message.reply_text(parsed)
+        return
+    hour, minute, tz = parsed
+
+    try:
+        reminder_id = await add_reminder(conn, user_id, hour, minute, tz)
+    except Exception as e:
+        log_user_error(logger, user_id, f"Failed to add reminder: {e}", exc_info=e)
+        await update.message.reply_text("Could not save reminder, please try again.")
+        return
+
+    reminder = {
+        "id": reminder_id,
+        "user_id": user_id,
+        "hour": hour,
+        "minute": minute,
+        "timezone": tz,
+    }
+    schedule_reminder(context.application, reminder)
+
+    zones = format_in_zones(hour, minute, tz)
+    msg = (
+        f"Reminder #{reminder_id} set for {hour:02d}:{minute:02d} {html.escape(tz)} "
+        f"(Berlin {zones['Europe/Berlin']}, Moscow {zones['Europe/Moscow']})."
+    )
+    if tz == DEFAULT_TZ and len(context.args or []) <= 1:
+        msg += f"\nDefault timezone is {DEFAULT_TZ} — pass an IANA name to override."
+    await update.message.reply_text(msg)
+
+
+async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    log_user_action(logger, user_id, "/reminders")
+    conn = _get_conn(context)
+    items = await get_reminders(conn, user_id)
+    if not items:
+        await update.message.reply_text("No reminders set. Use /remindme HH:MM to add one.")
+        return
+    lines = ["Your reminders:"] + [_format_reminder_line(r) for r in items]
+    lines.append("\nRemove with /remindoff <id> or /remindoff all.")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def remindoff_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    log_user_action(logger, user_id, f"/remindoff {_safe_log(' '.join(context.args or []))}")
+    conn = _get_conn(context)
+
+    if not context.args:
+        await update.message.reply_text("Usage: /remindoff <id> or /remindoff all")
+        return
+
+    arg = context.args[0].lower()
+    if arg == "all":
+        items = await get_reminders(conn, user_id)
+        for r in items:
+            cancel_reminder(context.application, r["id"])
+        count = await delete_all_reminders(conn, user_id)
+        await update.message.reply_text(f"Removed {count} reminder(s).")
+        return
+
+    if not arg.isdigit():
+        await update.message.reply_text("Reminder id must be a number, or 'all'.")
+        return
+
+    reminder_id = int(arg)
+    cancel_reminder(context.application, reminder_id)
+    deleted = await delete_reminder(conn, user_id, reminder_id)
+    if deleted:
+        await update.message.reply_text(f"Removed reminder #{reminder_id}.")
+    else:
+        await update.message.reply_text(f"No reminder #{reminder_id} found.")
+
+
 # --- /add conversation ---
 
 
@@ -439,9 +625,6 @@ async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def add_words_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
-    conn = _get_conn(context)
-    tag = context.user_data.get("add_tag", "")
     text = update.message.text
 
     parsed = []
@@ -457,7 +640,11 @@ async def add_words_received(update: Update, context: ContextTypes.DEFAULT_TYPE)
         error_text = "Errors found:\n" + "\n".join(f"  - {e}" for e in errors)
         if parsed:
             error_text += f"\n\n{len(parsed)} valid line(s) ready."
-        error_text += "\n\nFix errors and resend, or /skip to save valid lines only, or /cancel."
+            error_text += (
+                "\n\nFix errors and resend, /skip to preview valid lines only, or /cancel."
+            )
+        else:
+            error_text += "\n\nFix errors and resend, or /cancel."
         await update.message.reply_text(error_text, parse_mode="HTML")
         context.user_data["parsed_words"] = parsed
         return ADD_WORDS
@@ -466,28 +653,68 @@ async def add_words_received(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("No valid words found. Try again or /cancel.")
         return ADD_WORDS
 
-    return await _save_words(update, context, parsed, conn, user_id, tag)
+    context.user_data["parsed_words"] = parsed
+    return await _send_preview(update, parsed)
 
 
 async def add_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Save only the valid words, skipping errors."""
+    """Show preview of the already-parsed valid lines (errors skipped)."""
+    parsed = context.user_data.get("parsed_words", [])
+    if not parsed:
+        await update.message.reply_text("No valid words to preview. /cancel to abort.")
+        return ADD_WORDS
+    return await _send_preview(update, parsed)
+
+
+async def _send_preview(update: Update, parsed: list[dict]) -> int:
+    """Render the preview of parsed words and prompt the user to confirm."""
+    preview = _format_word_tables(parsed)
+    await update.message.reply_text(
+        f"Preview ({len(parsed)} word(s)):{preview}\n\n"
+        "Send /confirm to save, /cancel to abort, or send more words to replace this batch.",
+        parse_mode="HTML",
+    )
+    return ADD_CONFIRM
+
+
+async def add_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Persist the previewed batch."""
     user_id = update.effective_user.id
     conn = _get_conn(context)
     tag = context.user_data.get("add_tag", "")
     parsed = context.user_data.get("parsed_words", [])
-
     if not parsed:
-        await update.message.reply_text("No valid words to save. /cancel to abort.")
-        return ADD_WORDS
-
+        await update.message.reply_text("Nothing to save. Send /add to start over.")
+        _clear_add_state(context)
+        return ConversationHandler.END
     return await _save_words(update, context, parsed, conn, user_id, tag)
 
 
 async def _save_words(update, context, parsed, conn, user_id, tag) -> int:
-    """Save parsed words to DB and show preview."""
-    saved = []
+    """Save parsed words. If a word with same (german, POS) already exists,
+    merge the new tag into its existing tags instead of creating a duplicate row."""
+    added = []  # newly inserted
+    merged = []  # existing word, tag added
+    unchanged = []  # existing word, tag already present (or no tag given)
+
     for w in parsed:
         try:
+            existing = await find_word_by_german_pos(
+                conn, user_id, w["german"], w["part_of_speech"]
+            )
+            if existing is not None:
+                new_tags, changed = merge_tag(existing["tags"], tag)
+                if changed:
+                    await update_word_tags(conn, user_id, existing["id"], new_tags)
+                    w["id"] = existing["id"]
+                    w["tags"] = new_tags
+                    merged.append(w)
+                else:
+                    w["id"] = existing["id"]
+                    w["tags"] = existing["tags"]
+                    unchanged.append(w)
+                continue
+
             word_id = await add_word(
                 conn,
                 user_id,
@@ -501,7 +728,7 @@ async def _save_words(update, context, parsed, conn, user_id, tag) -> int:
                 tags=tag,
             )
             w["id"] = word_id
-            saved.append(w)
+            added.append(w)
         except ValueError as e:
             log_user_warning(logger, user_id, f"Failed to add word: {e}")
             await update.message.reply_text(f"Error: {html.escape(str(e))}")
@@ -512,15 +739,24 @@ async def _save_words(update, context, parsed, conn, user_id, tag) -> int:
                 "Database error — others may still be saved."
             )
 
-    if not saved:
-        await update.message.reply_text("No words were saved.")
-        return ConversationHandler.END
+    parts: list[str] = []
+    if added:
+        parts.append(f"Added {len(added)} new word(s):{_format_word_tables(added)}")
+    if merged:
+        safe_tag = html.escape(tag)
+        parts.append(
+            f"Tag <b>#{safe_tag}</b> added to {len(merged)} existing word(s):"
+            + _format_word_tables(merged)
+        )
+    if unchanged:
+        names = ", ".join(html.escape(w["german"]) for w in unchanged)
+        parts.append(f"Already existed (no change): {names}")
 
-    preview = _format_word_tables(saved)
-    await update.message.reply_text(
-        f"Added {len(saved)} word(s):{preview}",
-        parse_mode="HTML",
-    )
+    if not parts:
+        await update.message.reply_text("No words were saved.")
+    else:
+        await update.message.reply_text("\n\n".join(parts), parse_mode="HTML")
+
     _clear_add_state(context)
     return ConversationHandler.END
 
@@ -579,18 +815,44 @@ async def _send_question(reply_target, context: ContextTypes.DEFAULT_TYPE) -> No
     await reply_target.reply_text(text, reply_markup=markup, parse_mode="HTML")
 
 
+def _parse_quiz_args(args: list[str]) -> tuple[int | None, str | None]:
+    """Parse /quiz args. Returns (size, tag); either may be None.
+
+    Order-independent: the first purely-numeric arg is treated as size,
+    the first non-numeric arg as tag (with optional leading #).
+    """
+    size: int | None = None
+    tag: str | None = None
+    for raw in args:
+        candidate = raw.lstrip("#")
+        if size is None and candidate.isdigit():
+            size = int(candidate)
+        elif tag is None:
+            tag = candidate
+    return size, tag
+
+
 async def quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     conn = _get_conn(context)
     _clear_quiz_state(context)
 
-    tag = None
-    if context.args:
-        tag = context.args[0].lstrip("#")
+    requested_size, tag = _parse_quiz_args(context.args or [])
 
-    log_user_action(logger, user_id, f"/quiz tag={_safe_log(tag) if tag else 'all'}")
+    if requested_size is not None and requested_size <= 0:
+        await update.message.reply_text("Quiz size must be a positive number.")
+        return ConversationHandler.END
 
-    due_words = await get_due_words(conn, user_id, limit=QUIZ_SESSION_SIZE, tag=tag)
+    capped = False
+    if requested_size is not None and requested_size > QUIZ_MAX_SIZE:
+        requested_size = QUIZ_MAX_SIZE
+        capped = True
+
+    size = requested_size if requested_size is not None else QUIZ_SESSION_SIZE
+    log_user_action(logger, user_id, f"/quiz size={size} tag={_safe_log(tag) if tag else 'all'}")
+
+    # Fetch up to `size` most-due words; if user has fewer, build_quiz_session cycles.
+    due_words = await get_due_words(conn, user_id, limit=size, tag=tag)
     if not due_words:
         msg = "No words to quiz on."
         if tag:
@@ -601,14 +863,22 @@ async def quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     # Collect all user words for multiple choice options
     all_user_words = []
-    for pos in ("n", "v", "adj", "adv"):
+    for pos in ("n", "v", "adj", "adv", "prep"):
         all_user_words.extend(await get_words_by_pos(conn, user_id, pos))
 
-    session = build_quiz_session(user_id, due_words, all_user_words)
+    session = build_quiz_session(user_id, due_words, all_user_words, size=size)
     context.user_data["quiz_session"] = session
     context.user_data["quiz_all_words"] = all_user_words
 
-    await update.message.reply_text(QUIZ_START_MESSAGE, parse_mode="HTML")
+    intro = QUIZ_START_MESSAGE
+    if capped:
+        intro = f"(Capped to {QUIZ_MAX_SIZE} questions.)\n\n" + intro
+    if len(due_words) < size:
+        intro += (
+            f"\nYou have only {len(due_words)} word(s) — they will repeat to fill "
+            f"{size} questions."
+        )
+    await update.message.reply_text(intro, parse_mode="HTML")
     await _send_question(update.message, context)
     return QUIZ_ANSWERING
 
@@ -763,6 +1033,11 @@ def get_add_conversation() -> ConversationHandler:
         states={
             ADD_WORDS: [
                 CommandHandler("skip", add_skip),
+                CommandHandler("cancel", add_cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, add_words_received),
+            ],
+            ADD_CONFIRM: [
+                CommandHandler("confirm", add_confirm),
                 CommandHandler("cancel", add_cancel),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_words_received),
             ],
