@@ -1,0 +1,431 @@
+from datetime import datetime
+
+import aiosqlite
+
+from bot.logging_config import get_logger, log_user_action, log_user_warning
+
+DB_PATH = "data/wortschatz.db"
+
+logger = get_logger(__name__)
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS words (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    part_of_speech TEXT NOT NULL,
+    german TEXT NOT NULL,
+    article TEXT,
+    plural TEXT,
+    partizip_ii TEXT,
+    ich_form TEXT,
+    du_form TEXT,
+    er_form TEXT,
+    translation TEXT NOT NULL,
+    tags TEXT DEFAULT '',
+    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_words_user_id ON words(user_id);
+CREATE INDEX IF NOT EXISTS idx_words_user_pos ON words(user_id, part_of_speech);
+
+CREATE TABLE IF NOT EXISTS sm2_state (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    word_id INTEGER NOT NULL,
+    quiz_type TEXT NOT NULL,
+    easiness_factor REAL DEFAULT 2.5,
+    interval INTEGER DEFAULT 0,
+    repetitions INTEGER DEFAULT 0,
+    correct_count INTEGER DEFAULT 0,
+    next_review TIMESTAMP,
+    FOREIGN KEY (word_id) REFERENCES words(id) ON DELETE CASCADE,
+    UNIQUE(user_id, word_id, quiz_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sm2_word_id ON sm2_state(word_id);
+CREATE INDEX IF NOT EXISTS idx_sm2_user_next ON sm2_state(user_id, next_review);
+
+CREATE TABLE IF NOT EXISTS quiz_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    word_id INTEGER NOT NULL,
+    quiz_type TEXT NOT NULL,
+    correct INTEGER NOT NULL,
+    answered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (word_id) REFERENCES words(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_history_user_date ON quiz_history(user_id, answered_at);
+"""
+
+VALID_PARTS_OF_SPEECH = {"n", "v", "adj", "adv"}
+VALID_QUIZ_TYPES = {"translate", "multiple_choice", "article", "verb_forms"}
+
+# Mapping: part_of_speech -> list of applicable quiz types
+APPLICABLE_QUIZ_TYPES: dict[str, list[str]] = {
+    "n": ["translate", "multiple_choice", "article"],
+    "v": ["translate", "multiple_choice"],  # regular verbs
+    "adj": ["translate", "multiple_choice"],
+    "adv": ["translate", "multiple_choice"],
+}
+
+# Irregular verbs (those with ich/du/er forms) also get "verb_forms"
+VERB_FORMS_QUIZ = "verb_forms"
+
+
+def get_quiz_types_for_word(word: dict) -> list[str]:
+    """Return the list of applicable quiz types for a given word."""
+    pos = word["part_of_speech"]
+    types = list(APPLICABLE_QUIZ_TYPES.get(pos, ["translate", "multiple_choice"]))
+    if pos == "v" and word.get("ich_form"):
+        types.append(VERB_FORMS_QUIZ)
+    return types
+
+
+def _escape_like(value: str) -> str:
+    """Escape special LIKE characters in a value."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _normalize_tags(tags: str) -> str:
+    """Normalize a comma-separated tags string: strip whitespace, remove empties."""
+    parts = [t.strip() for t in tags.split(",") if t.strip()]
+    return ",".join(parts)
+
+
+async def get_connection(db_path: str = DB_PATH) -> aiosqlite.Connection:
+    try:
+        conn = await aiosqlite.connect(db_path)
+    except Exception:
+        logger.error(
+            "Failed to connect to database at %s",
+            db_path,
+            extra={"user_id": "system"},
+            exc_info=True,
+        )
+        raise
+    await conn.execute("PRAGMA foreign_keys = ON")
+    conn.row_factory = aiosqlite.Row
+    return conn
+
+
+async def init_db(db_path: str = DB_PATH) -> None:
+    conn = None
+    try:
+        conn = await get_connection(db_path)
+        await conn.executescript(SCHEMA)
+        await conn.commit()
+        logger.info("Database initialized", extra={"user_id": "system"})
+    except Exception:
+        logger.error("Failed to initialize database", extra={"user_id": "system"}, exc_info=True)
+        raise
+    finally:
+        if conn is not None:
+            await conn.close()
+
+
+# --- Words ---
+
+
+async def add_word(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    part_of_speech: str,
+    german: str,
+    translation: str,
+    article: str | None = None,
+    plural: str | None = None,
+    partizip_ii: str | None = None,
+    ich_form: str | None = None,
+    du_form: str | None = None,
+    er_form: str | None = None,
+    tags: str = "",
+) -> int:
+    if part_of_speech not in VALID_PARTS_OF_SPEECH:
+        raise ValueError(f"Invalid part_of_speech: {part_of_speech!r}")
+    if not german or not german.strip():
+        raise ValueError("german word cannot be empty")
+    if not translation or not translation.strip():
+        raise ValueError("translation cannot be empty")
+
+    normalized_tags = _normalize_tags(tags)
+    cursor = await conn.execute(
+        """INSERT INTO words
+           (user_id, part_of_speech, german, article, plural,
+            partizip_ii, ich_form, du_form, er_form, translation, tags)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            user_id,
+            part_of_speech,
+            german.strip(),
+            article,
+            plural,
+            partizip_ii,
+            ich_form,
+            du_form,
+            er_form,
+            translation.strip(),
+            normalized_tags,
+        ),
+    )
+    await conn.commit()
+    log_user_action(logger, user_id, f"Added word: {german} ({part_of_speech})")
+    return cursor.lastrowid
+
+
+async def delete_word(conn: aiosqlite.Connection, user_id: int, word_id: int) -> bool:
+    cursor = await conn.execute(
+        "DELETE FROM words WHERE id = ? AND user_id = ?",
+        (word_id, user_id),
+    )
+    await conn.commit()
+    if cursor.rowcount > 0:
+        log_user_action(logger, user_id, f"Deleted word id={word_id}")
+        return True
+    log_user_warning(logger, user_id, f"Attempted to delete non-existent word id={word_id}")
+    return False
+
+
+async def get_words(conn: aiosqlite.Connection, user_id: int, tag: str | None = None) -> list[dict]:
+    if tag:
+        escaped_tag = _escape_like(tag)
+        cursor = await conn.execute(
+            """SELECT * FROM words WHERE user_id = ?
+               AND (',' || tags || ',') LIKE ? ESCAPE '\\'
+               ORDER BY added_at DESC""",
+            (user_id, f"%,{escaped_tag},%"),
+        )
+    else:
+        cursor = await conn.execute(
+            "SELECT * FROM words WHERE user_id = ? ORDER BY added_at DESC",
+            (user_id,),
+        )
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def get_word_by_id(conn: aiosqlite.Connection, word_id: int, user_id: int) -> dict | None:
+    cursor = await conn.execute(
+        "SELECT * FROM words WHERE id = ? AND user_id = ?", (word_id, user_id)
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def get_tags(conn: aiosqlite.Connection, user_id: int) -> list[str]:
+    cursor = await conn.execute(
+        "SELECT DISTINCT tags FROM words WHERE user_id = ? AND tags != ''",
+        (user_id,),
+    )
+    rows = await cursor.fetchall()
+    tag_set = set()
+    for row in rows:
+        for t in row["tags"].split(","):
+            t = t.strip()
+            if t:
+                tag_set.add(t)
+    return sorted(tag_set)
+
+
+async def add_tag_to_word(conn: aiosqlite.Connection, word_id: int, user_id: int, tag: str) -> None:
+    tag = tag.strip()
+    if not tag:
+        log_user_warning(logger, user_id, "Attempted to add empty tag")
+        return
+
+    async with conn.execute("BEGIN"):
+        cursor = await conn.execute(
+            "SELECT tags FROM words WHERE id = ? AND user_id = ?", (word_id, user_id)
+        )
+        row = await cursor.fetchone()
+        if not row:
+            log_user_warning(
+                logger, user_id, f"Attempted to add tag to non-existent word id={word_id}"
+            )
+            return
+        existing = row["tags"]
+        existing_tags = [t.strip() for t in existing.split(",") if t.strip()]
+        if tag not in existing_tags:
+            existing_tags.append(tag)
+            new_tags = ",".join(existing_tags)
+            await conn.execute(
+                "UPDATE words SET tags = ? WHERE id = ? AND user_id = ?",
+                (new_tags, word_id, user_id),
+            )
+    await conn.commit()
+    log_user_action(logger, user_id, f"Added tag '{tag}' to word id={word_id}")
+
+
+# --- Words by part of speech (for quiz options) ---
+
+
+async def get_words_by_pos(
+    conn: aiosqlite.Connection, user_id: int, part_of_speech: str
+) -> list[dict]:
+    cursor = await conn.execute(
+        "SELECT * FROM words WHERE user_id = ? AND part_of_speech = ?",
+        (user_id, part_of_speech),
+    )
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+# --- SM2 State ---
+
+
+async def get_sm2_state(
+    conn: aiosqlite.Connection, user_id: int, word_id: int, quiz_type: str
+) -> dict | None:
+    cursor = await conn.execute(
+        """SELECT * FROM sm2_state
+           WHERE user_id = ? AND word_id = ? AND quiz_type = ?""",
+        (user_id, word_id, quiz_type),
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def upsert_sm2_state(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    word_id: int,
+    quiz_type: str,
+    easiness_factor: float,
+    interval: int,
+    repetitions: int,
+    correct_count: int,
+    next_review: datetime,
+) -> None:
+    if quiz_type not in VALID_QUIZ_TYPES:
+        raise ValueError(f"Invalid quiz_type: {quiz_type!r}")
+
+    await conn.execute(
+        """INSERT INTO sm2_state
+           (user_id, word_id, quiz_type, easiness_factor, interval, repetitions,
+            correct_count, next_review)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(user_id, word_id, quiz_type)
+           DO UPDATE SET
+             easiness_factor = excluded.easiness_factor,
+             interval = excluded.interval,
+             repetitions = excluded.repetitions,
+             correct_count = excluded.correct_count,
+             next_review = excluded.next_review""",
+        (
+            user_id,
+            word_id,
+            quiz_type,
+            easiness_factor,
+            interval,
+            repetitions,
+            correct_count,
+            next_review.isoformat(),
+        ),
+    )
+    await conn.commit()
+
+
+async def get_due_words(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    limit: int = 7,
+    tag: str | None = None,
+) -> list[dict]:
+    """Get words most due for review. Returns words with earliest next_review first.
+
+    Words without SM2 state (never reviewed) are prioritized.
+    """
+    if tag:
+        escaped_tag = _escape_like(tag)
+        query = """
+            SELECT w.*, MIN(COALESCE(s.next_review, '1970-01-01')) as earliest_review
+            FROM words w
+            LEFT JOIN sm2_state s ON w.id = s.word_id AND s.user_id = w.user_id
+            WHERE w.user_id = ?
+              AND (',' || w.tags || ',') LIKE ? ESCAPE '\\'
+            GROUP BY w.id
+            ORDER BY earliest_review ASC
+            LIMIT ?
+        """
+        cursor = await conn.execute(query, (user_id, f"%,{escaped_tag},%", limit))
+    else:
+        query = """
+            SELECT w.*, MIN(COALESCE(s.next_review, '1970-01-01')) as earliest_review
+            FROM words w
+            LEFT JOIN sm2_state s ON w.id = s.word_id AND s.user_id = w.user_id
+            WHERE w.user_id = ?
+            GROUP BY w.id
+            ORDER BY earliest_review ASC
+            LIMIT ?
+        """
+        cursor = await conn.execute(query, (user_id, limit))
+
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+# --- Quiz History ---
+
+
+async def add_quiz_history(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    word_id: int,
+    quiz_type: str,
+    correct: bool,
+) -> None:
+    if quiz_type not in VALID_QUIZ_TYPES:
+        raise ValueError(f"Invalid quiz_type: {quiz_type!r}")
+
+    await conn.execute(
+        """INSERT INTO quiz_history (user_id, word_id, quiz_type, correct)
+           VALUES (?, ?, ?, ?)""",
+        (user_id, word_id, quiz_type, 1 if correct else 0),
+    )
+    await conn.commit()
+
+
+async def get_stats(conn: aiosqlite.Connection, user_id: int, since: datetime) -> dict:
+    """Get statistics since a given date."""
+    since_str = since.isoformat()
+
+    # Quizzes completed
+    cursor = await conn.execute(
+        "SELECT COUNT(*) as cnt FROM quiz_history WHERE user_id = ? AND answered_at >= ?",
+        (user_id, since_str),
+    )
+    row = await cursor.fetchone()
+    quizzes_completed = row["cnt"]
+
+    # Words added
+    cursor = await conn.execute(
+        "SELECT COUNT(*) as cnt FROM words WHERE user_id = ? AND added_at >= ?",
+        (user_id, since_str),
+    )
+    row = await cursor.fetchone()
+    words_added = row["cnt"]
+
+    # Words learned: all applicable quiz types have correct_count >= 4
+    cursor = await conn.execute(
+        """SELECT w.id, w.part_of_speech, w.ich_form,
+                  COUNT(s.id) as passed_types
+           FROM words w
+           JOIN sm2_state s ON w.id = s.word_id AND s.user_id = w.user_id
+                               AND s.correct_count >= 4
+           WHERE w.user_id = ? AND w.added_at >= ?
+           GROUP BY w.id""",
+        (user_id, since_str),
+    )
+    rows = await cursor.fetchall()
+    words_learned = 0
+    for r in rows:
+        word_dict = dict(r)
+        expected = len(get_quiz_types_for_word(word_dict))
+        if word_dict["passed_types"] >= expected:
+            words_learned += 1
+
+    return {
+        "quizzes_completed": quizzes_completed,
+        "words_added": words_added,
+        "words_learned": words_learned,
+    }
