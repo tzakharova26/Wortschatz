@@ -19,6 +19,7 @@ from bot.database import (
     get_words,
     get_words_by_pos,
     init_db,
+    parse_irregular_forms,
     upsert_sm2_state,
 )
 
@@ -52,13 +53,14 @@ class TestAddWord:
             "fahren",
             "to drive",
             partizip_ii="ist gefahren",
-            ich_form="fahre",
-            du_form="f\u00e4hrst",
-            er_form="f\u00e4hrt",
+            irregular_forms={"ich": "fahre", "du": "f\u00e4hrst", "er": "f\u00e4hrt"},
         )
         word = await get_word_by_id(db, word_id, USER_ID)
         assert word["partizip_ii"] == "ist gefahren"
-        assert word["ich_form"] == "fahre"
+        import json
+
+        forms = json.loads(word["irregular_forms"])
+        assert forms["ich"] == "fahre"
 
     async def test_add_adjective(self, db):
         word_id = await add_word(db, USER_ID, "adj", "schnell", "fast")
@@ -243,15 +245,15 @@ class TestWordsByPos:
 
 class TestQuizTypesForWord:
     def test_noun(self):
-        word = {"part_of_speech": "n", "ich_form": None}
+        word = {"part_of_speech": "n", "irregular_forms": None}
         assert get_quiz_types_for_word(word) == ["translate", "multiple_choice", "article"]
 
     def test_regular_verb(self):
-        word = {"part_of_speech": "v", "ich_form": None}
+        word = {"part_of_speech": "v", "irregular_forms": None}
         assert get_quiz_types_for_word(word) == ["translate", "multiple_choice"]
 
     def test_irregular_verb(self):
-        word = {"part_of_speech": "v", "ich_form": "fahre"}
+        word = {"part_of_speech": "v", "irregular_forms": '{"ich": "fahre"}'}
         assert get_quiz_types_for_word(word) == [
             "translate",
             "multiple_choice",
@@ -259,7 +261,15 @@ class TestQuizTypesForWord:
         ]
 
     def test_adjective(self):
-        word = {"part_of_speech": "adj", "ich_form": None}
+        word = {"part_of_speech": "adj", "irregular_forms": None}
+        assert get_quiz_types_for_word(word) == ["translate", "multiple_choice"]
+
+    def test_verb_with_empty_json_forms(self):
+        word = {"part_of_speech": "v", "irregular_forms": "{}"}
+        assert get_quiz_types_for_word(word) == ["translate", "multiple_choice"]
+
+    def test_verb_with_invalid_json_forms(self):
+        word = {"part_of_speech": "v", "irregular_forms": "not json"}
         assert get_quiz_types_for_word(word) == ["translate", "multiple_choice"]
 
 
@@ -490,9 +500,7 @@ class TestStats:
             "fahren",
             "to drive",
             partizip_ii="ist gefahren",
-            ich_form="fahre",
-            du_form="f\u00e4hrst",
-            er_form="f\u00e4hrt",
+            irregular_forms={"ich": "fahre", "du": "f\u00e4hrst", "er": "f\u00e4hrt"},
         )
         now = datetime.now()
         for qt in ["translate", "multiple_choice", "verb_forms"]:
@@ -556,3 +564,77 @@ class TestInitDb:
     async def test_init_invalid_path(self):
         with pytest.raises(sqlite3.OperationalError):
             await init_db("/nonexistent/dir/that/cannot/exist/db.sqlite")
+
+
+class TestParseIrregularForms:
+    def test_valid_json(self):
+        forms = parse_irregular_forms('{"ich": "fahre", "du": "fährst"}')
+        assert forms == {"ich": "fahre", "du": "fährst"}
+
+    def test_none(self):
+        assert parse_irregular_forms(None) is None
+
+    def test_empty_string(self):
+        assert parse_irregular_forms("") is None
+
+    def test_invalid_json(self):
+        assert parse_irregular_forms("not json") is None
+
+    def test_non_dict_json(self):
+        assert parse_irregular_forms('["a", "b"]') is None
+
+    def test_integer_json(self):
+        assert parse_irregular_forms("42") is None
+
+    def test_whitespace_only(self):
+        assert parse_irregular_forms("   ") is None
+
+
+class TestIrregularFormsRoundTrip:
+    async def test_store_and_parse(self, db):
+        forms = {"ich": "fahre", "du": "f\u00e4hrst", "er": "f\u00e4hrt"}
+        word_id = await add_word(
+            db,
+            USER_ID,
+            "v",
+            "fahren",
+            "to drive",
+            partizip_ii="ist gefahren",
+            irregular_forms=forms,
+        )
+        word = await get_word_by_id(db, word_id, USER_ID)
+        parsed = parse_irregular_forms(word["irregular_forms"])
+        assert parsed == forms
+
+    async def test_empty_dict_stores_as_json(self, db):
+        word_id = await add_word(
+            db,
+            USER_ID,
+            "v",
+            "machen",
+            "to do",
+            irregular_forms={},
+        )
+        word = await get_word_by_id(db, word_id, USER_ID)
+        # Empty dict is explicitly stored (not None)
+        assert word["irregular_forms"] is not None
+        parsed = parse_irregular_forms(word["irregular_forms"])
+        assert parsed == {}
+
+    async def test_none_forms_stores_null(self, db):
+        word_id = await add_word(
+            db,
+            USER_ID,
+            "v",
+            "machen",
+            "to do",
+            irregular_forms=None,
+        )
+        word = await get_word_by_id(db, word_id, USER_ID)
+        assert word["irregular_forms"] is None
+
+
+class TestQuizTypesAdverb:
+    def test_adverb(self):
+        word = {"part_of_speech": "adv", "irregular_forms": None}
+        assert get_quiz_types_for_word(word) == ["translate", "multiple_choice"]

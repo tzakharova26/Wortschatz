@@ -76,6 +76,7 @@ Example: `v machen hat gemacht to do`
 v <infinitive> <partizip_ii> <ich> <du> <er/sie/es> <translation>
 ```
 Example: `v fahren ist gefahren fahre faehrst faehrt to drive`
+Stored as JSON in `irregular_forms`: `{"ich": "fahre", "du": "fährst", "er": "fährt"}`
 
 **Adjectives (adj):**
 ```
@@ -97,9 +98,12 @@ Example: `adv manchmal sometimes`
 - `quiz_type` must be one of: `translate`, `multiple_choice`, `article`, `verb_forms`
 
 ### Umlaut Handling
-- Store and display proper Unicode (ae->a, oe->o, ue->u, ss->ss)
+- Store and display proper Unicode (ae->ä, oe->ö, ue->ü, ss->ß where appropriate)
 - Accept both ASCII and Unicode forms on input
-- Accept both forms in quiz answers (e.g., "faehrt" and "fahrt" both accepted)
+- **Quiz answer matching (directional):**
+  - User may simplify: ä→ae, ö→oe, ü→ue, ß→ss — always accepted
+  - User must NOT add special chars where stored word doesn't have them: typing ä where stored is a = WRONG, typing ß where stored is ss = WRONG
+  - Algorithm: expand both stored and user input (ä→ae, ß→ss etc.), compare. Additionally check that user's original input doesn't contain ä/ö/ü/ß at positions where stored word has plain a/o/u/ss
 
 ### Tags
 - A word can have **multiple tags** (assigned across different `/add` sessions)
@@ -109,25 +113,88 @@ Example: `adv manchmal sometimes`
 
 ## Quiz System
 
+### Quiz Config (`bot/config.py`)
+```python
+QUIZ_SESSION_SIZE = 7
+QUIZ_TEMPERATURE = 0.3
+
+QUIZ_TYPE_WEIGHTS = {
+    "translate": 1.0,
+    "verb_forms": 0.9,
+    "multiple_choice": 0.6,
+    "article": 0.5,
+}
+```
+
 ### Quiz Types (mixed in one session)
-1. **Translation -> German** -- bot shows translation, user types the German word (all parts of speech)
-2. **Multiple choice German -> Translation** -- bot shows German word + 4 options; wrong options from same part of speech, preferring same tag, falling back to any words of same part of speech
-3. **Article quiz** -- nouns only: bot shows noun, user picks der/die/das
-4. **Verb forms quiz** -- irregular verbs only: bot shows infinitive, user types the irregular present form(s)
+1. **translate** -- bot shows translation, user types the German word (all POS). For nouns, user must include article.
+2. **multiple_choice** -- bot shows German word + buttons with translation options; wrong options from same POS, fallback to all vocabulary. Buttons in Telegram.
+3. **article** -- nouns only: bot shows noun without article, user picks der/die/das buttons.
+4. **verb_forms** -- irregular verbs only: bot shows infinitive + which form to type (e.g. "du"), user types the form. Form is randomly picked from stored irregular_forms JSON.
 
-### Multiple Choice Fallback
-When fewer than 4 words exist in the same tag + part of speech, fall back to same part of speech across all user's words.
+### Multiple Choice Option Filling
+1. Try same POS words from user's vocabulary (3 wrong options needed)
+2. If < 3 same POS available, fill from any POS in user's vocabulary
+3. If total words < 4, use whatever is available (even 2 options)
 
-### Session
-- **7 questions** per session, mixed quiz types (only applicable types per word)
-- `/quiz` -- SM-2 picks the 7 most due words across all vocabulary
-- `/quiz #tag` -- picks the 7 most due (least reviewed) words within that tag
+### Quiz Type Selection (Temperature-weighted)
+For each word, select quiz type using weighted random:
+- `weight = QUIZ_TYPE_WEIGHTS[quiz_type]`
+- Each quiz type weight is temperatured by how long since the word was last reviewed (overall, not per quiz type):
+  `score = (days_since_last_review + 1) ^ (1 / TEMPERATURE)`
+  `final_weight = score * QUIZ_TYPE_WEIGHTS[quiz_type]`
+- Low temperature (0.3) = long-unseen words dominate
+- High temperature (1.0) = flatter distribution
+- Never-reviewed words get a high default days_since value
+
+### Self-Rating Buttons (Anki-style, 4 + misspell)
+After user answers and sees the correct answer, show rating buttons:
+- `Blackout (0)` -- no idea at all
+- `Wrong (1)` -- got it wrong but somewhat remembered
+- `Good (4)` -- correct, normal effort
+- `Easy (5)` -- correct, effortless
+- `Misspell` -- knew the word but typo/spelling error; doesn't count, word re-added at end of session with freshly selected quiz type
+
+The quiz start message must explain these buttons to the user.
+
+### Session Flow
+1. `/quiz` or `/quiz #tag` -> generate QuizSession -> send start message with rating explanation -> send first question
+2. User answers (types text or taps button) -> show result (correct/wrong + correct answer) + rating buttons
+3. User rates -> store rating, advance to next question
+4. If "Misspell" tapped -> recalculate quiz type for the word, append new question at end
+5. After last question -> show summary with congrats (e.g., "5/7 correct" + per-word breakdown)
+6. Async bulk-update SM-2 state and quiz_history after session ends
+
+### Session Data Model
+```python
+@dataclass
+class QuizQuestion:
+    word: dict
+    quiz_type: str
+    prompt: str              # text to show user
+    options: list[str] | None  # for multiple_choice/article buttons, None for typed
+    correct_answer: str
+    verb_form_key: str | None  # "du", "er" etc. for verb_forms type
+
+@dataclass
+class QuizSession:
+    questions: list[QuizQuestion]
+    current_index: int = 0
+    results: list[tuple[int, bool]]  # (quality_rating, was_correct)
+```
 
 ### SM-2 Spaced Repetition Algorithm
 Full SM-2 implementation:
 - Each word+quiz_type pair has its own SM-2 state (easiness factor, interval, repetitions)
-- After each answer, update the SM-2 parameters
+- After each answer, SM-2 state updated with the user's self-rated quality (0-5)
 - Words with earliest due date are prioritized for quiz selection
+
+### Schema: Verb Forms as JSON
+Replace `ich_form`, `du_form`, `er_form` columns with:
+```sql
+irregular_forms TEXT  -- JSON: {"ich": "fahre", "du": "faehrst", "er": "faehrt"}
+```
+Input format unchanged; positions parsed as ich, du, er by default. JSON storage is extensible for future forms.
 
 ### "Learned" Definition (for stats only)
 A word is considered **learned** when all applicable quiz types have been passed at least **4 times total**:
@@ -169,9 +236,7 @@ CREATE TABLE words (
     article TEXT,                   -- der/die/das (nouns only)
     plural TEXT,                    -- nouns only
     partizip_ii TEXT,               -- verbs only
-    ich_form TEXT,                  -- irregular verbs only
-    du_form TEXT,                   -- irregular verbs only
-    er_form TEXT,                   -- irregular verbs only
+    irregular_forms TEXT,            -- JSON: {"ich": "fahre", "du": "fährst", "er": "fährt"}
     translation TEXT NOT NULL,
     tags TEXT DEFAULT '',           -- comma-separated, e.g. 'animals,A1'
     added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -255,7 +320,7 @@ The `data/` directory is mounted as a persistent Docker volume (`bot-data:/app/d
 - [x] Umlaut utilities
 - [x] Database layer with validation, logging, indexes
 - [x] Logging & error handling infrastructure
-- [ ] SM-2 spaced repetition algorithm
+- [x] SM-2 spaced repetition algorithm
 - [ ] Quiz logic (question generation, session management)
 - [ ] Telegram handlers (commands, ConversationHandler for /add and /quiz)
 - [ ] Main entry point

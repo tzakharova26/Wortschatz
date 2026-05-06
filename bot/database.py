@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 
 import aiosqlite
@@ -17,9 +18,7 @@ CREATE TABLE IF NOT EXISTS words (
     article TEXT,
     plural TEXT,
     partizip_ii TEXT,
-    ich_form TEXT,
-    du_form TEXT,
-    er_form TEXT,
+    irregular_forms TEXT,
     translation TEXT NOT NULL,
     tags TEXT DEFAULT '',
     added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -77,9 +76,33 @@ def get_quiz_types_for_word(word: dict) -> list[str]:
     """Return the list of applicable quiz types for a given word."""
     pos = word["part_of_speech"]
     types = list(APPLICABLE_QUIZ_TYPES.get(pos, ["translate", "multiple_choice"]))
-    if pos == "v" and word.get("ich_form"):
-        types.append(VERB_FORMS_QUIZ)
+    if pos == "v":
+        forms = parse_irregular_forms(word.get("irregular_forms"))
+        if forms:
+            types.append(VERB_FORMS_QUIZ)
     return types
+
+
+def parse_irregular_forms(raw: str | None) -> dict | None:
+    """Parse irregular_forms JSON string from DB into a dict."""
+    if not raw:
+        return None
+    try:
+        forms = json.loads(raw)
+        if isinstance(forms, dict):
+            return forms
+        logger.warning(
+            "irregular_forms is not a dict: %r",
+            raw,
+            extra={"user_id": "system"},
+        )
+    except (json.JSONDecodeError, TypeError):
+        logger.warning(
+            "Failed to parse irregular_forms JSON: %r",
+            raw,
+            extra={"user_id": "system"},
+        )
+    return None
 
 
 def _escape_like(value: str) -> str:
@@ -136,9 +159,7 @@ async def add_word(
     article: str | None = None,
     plural: str | None = None,
     partizip_ii: str | None = None,
-    ich_form: str | None = None,
-    du_form: str | None = None,
-    er_form: str | None = None,
+    irregular_forms: dict | None = None,
     tags: str = "",
 ) -> int:
     if part_of_speech not in VALID_PARTS_OF_SPEECH:
@@ -152,8 +173,8 @@ async def add_word(
     cursor = await conn.execute(
         """INSERT INTO words
            (user_id, part_of_speech, german, article, plural,
-            partizip_ii, ich_form, du_form, er_form, translation, tags)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            partizip_ii, irregular_forms, translation, tags)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             user_id,
             part_of_speech,
@@ -161,9 +182,7 @@ async def add_word(
             article,
             plural,
             partizip_ii,
-            ich_form,
-            du_form,
-            er_form,
+            json.dumps(irregular_forms) if irregular_forms is not None else None,
             translation.strip(),
             normalized_tags,
         ),
@@ -233,25 +252,25 @@ async def add_tag_to_word(conn: aiosqlite.Connection, word_id: int, user_id: int
         log_user_warning(logger, user_id, "Attempted to add empty tag")
         return
 
-    async with conn.execute("BEGIN"):
-        cursor = await conn.execute(
-            "SELECT tags FROM words WHERE id = ? AND user_id = ?", (word_id, user_id)
-        )
-        row = await cursor.fetchone()
-        if not row:
-            log_user_warning(
-                logger, user_id, f"Attempted to add tag to non-existent word id={word_id}"
-            )
-            return
-        existing = row["tags"]
-        existing_tags = [t.strip() for t in existing.split(",") if t.strip()]
-        if tag not in existing_tags:
-            existing_tags.append(tag)
-            new_tags = ",".join(existing_tags)
-            await conn.execute(
-                "UPDATE words SET tags = ? WHERE id = ? AND user_id = ?",
-                (new_tags, word_id, user_id),
-            )
+    cursor = await conn.execute(
+        "SELECT tags FROM words WHERE id = ? AND user_id = ?", (word_id, user_id)
+    )
+    row = await cursor.fetchone()
+    if not row:
+        log_user_warning(logger, user_id, f"Attempted to add tag to non-existent word id={word_id}")
+        return
+
+    existing = row["tags"]
+    existing_tags = [t.strip() for t in existing.split(",") if t.strip()]
+    if tag in existing_tags:
+        return
+
+    existing_tags.append(tag)
+    new_tags = ",".join(existing_tags)
+    await conn.execute(
+        "UPDATE words SET tags = ? WHERE id = ? AND user_id = ?",
+        (new_tags, word_id, user_id),
+    )
     await conn.commit()
     log_user_action(logger, user_id, f"Added tag '{tag}' to word id={word_id}")
 
@@ -323,6 +342,12 @@ async def upsert_sm2_state(
         ),
     )
     await conn.commit()
+    log_user_action(
+        logger,
+        user_id,
+        f"Updated SM2 state: word_id={word_id}, type={quiz_type}, "
+        f"ef={easiness_factor:.2f}, interval={interval}, reps={repetitions}",
+    )
 
 
 async def get_due_words(
@@ -383,6 +408,11 @@ async def add_quiz_history(
         (user_id, word_id, quiz_type, 1 if correct else 0),
     )
     await conn.commit()
+    log_user_action(
+        logger,
+        user_id,
+        f"Quiz answer: word_id={word_id}, type={quiz_type}, correct={correct}",
+    )
 
 
 async def get_stats(conn: aiosqlite.Connection, user_id: int, since: datetime) -> dict:
@@ -407,7 +437,7 @@ async def get_stats(conn: aiosqlite.Connection, user_id: int, since: datetime) -
 
     # Words learned: all applicable quiz types have correct_count >= 4
     cursor = await conn.execute(
-        """SELECT w.id, w.part_of_speech, w.ich_form,
+        """SELECT w.id, w.part_of_speech, w.irregular_forms,
                   COUNT(s.id) as passed_types
            FROM words w
            JOIN sm2_state s ON w.id = s.word_id AND s.user_id = w.user_id
