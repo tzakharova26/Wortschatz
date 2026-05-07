@@ -1,6 +1,6 @@
 import sqlite3
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -27,6 +27,41 @@ from bot.database import (
 )
 
 USER_ID = 12345
+
+
+class TestMigration:
+    async def test_init_db_adds_last_quality_to_legacy_schema(self, tmp_path):
+        """init_db should add last_quality to a pre-existing sm2_state table
+        that doesn't have it yet (idempotent ALTER TABLE)."""
+        db_path = str(tmp_path / "legacy.db")
+        # Build a sm2_state without last_quality (legacy shape)
+        legacy_conn = sqlite3.connect(db_path)
+        legacy_conn.executescript(
+            """
+            CREATE TABLE sm2_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                word_id INTEGER NOT NULL,
+                quiz_type TEXT NOT NULL,
+                easiness_factor REAL DEFAULT 2.5,
+                interval INTEGER DEFAULT 0,
+                repetitions INTEGER DEFAULT 0,
+                correct_count INTEGER DEFAULT 0,
+                next_review TIMESTAMP,
+                UNIQUE(user_id, word_id, quiz_type)
+            );
+            """
+        )
+        legacy_conn.commit()
+        legacy_conn.close()
+
+        await init_db(db_path)
+
+        check = sqlite3.connect(db_path)
+        cur = check.execute("PRAGMA table_info(sm2_state)")
+        cols = {row[1] for row in cur.fetchall()}
+        check.close()
+        assert "last_quality" in cols
 
 
 class TestAddWord:
@@ -321,27 +356,75 @@ class TestSM2State:
 
 
 class TestDueWords:
-    async def test_new_words_prioritized(self, db):
-        await add_word(db, USER_ID, "adj", "schnell", "fast")
-        await add_word(db, USER_ID, "adj", "langsam", "slow")
+    async def test_graduated_words_returned(self, db):
+        from tests.helpers import graduate_word
+
+        w1 = await add_word(db, USER_ID, "adj", "schnell", "fast")
+        w2 = await add_word(db, USER_ID, "adj", "langsam", "slow")
+        await graduate_word(db, w1, USER_ID)
+        await graduate_word(db, w2, USER_ID)
         due = await get_due_words(db, USER_ID, limit=7)
         assert len(due) == 2
 
+    async def test_excludes_brand_new_words(self, db):
+        """Words with no quiz_history belong to /learn, not /quiz."""
+        await add_word(db, USER_ID, "adj", "schnell", "fast")
+        await add_word(db, USER_ID, "adj", "langsam", "slow")
+        due = await get_due_words(db, USER_ID, limit=7)
+        assert due == []
+
+    async def test_excludes_blackout_flagged_words(self, db):
+        """A word with last_quality=0 has been demoted to /learn until graduated."""
+        from tests.helpers import graduate_word
+
+        w_ok = await add_word(db, USER_ID, "adj", "schnell", "fast")
+        w_bad = await add_word(db, USER_ID, "adj", "langsam", "slow")
+        await graduate_word(db, w_ok, USER_ID)
+        # graduate then mark as Blackout (last_quality=0)
+        await graduate_word(db, w_bad, USER_ID)
+        await upsert_sm2_state(
+            db,
+            USER_ID,
+            w_bad,
+            "translate",
+            easiness_factor=2.5,
+            interval=1,
+            repetitions=0,
+            correct_count=1,
+            next_review=datetime.now() - timedelta(days=1),
+            last_quality=0,
+        )
+        due = await get_due_words(db, USER_ID, limit=7)
+        ids = [d["id"] for d in due]
+        assert w_ok in ids
+        assert w_bad not in ids
+
     async def test_respects_limit(self, db):
+        from tests.helpers import graduate_word
+
         for i in range(10):
-            await add_word(db, USER_ID, "adj", f"word{i}", f"trans{i}")
+            wid = await add_word(db, USER_ID, "adj", f"word{i}", f"trans{i}")
+            await graduate_word(db, wid, USER_ID)
         due = await get_due_words(db, USER_ID, limit=3)
         assert len(due) == 3
 
     async def test_filter_by_tag(self, db):
-        await add_word(db, USER_ID, "adj", "schnell", "fast", tags="common")
-        await add_word(db, USER_ID, "adj", "langsam", "slow", tags="rare")
+        from tests.helpers import graduate_word
+
+        w1 = await add_word(db, USER_ID, "adj", "schnell", "fast", tags="common")
+        w2 = await add_word(db, USER_ID, "adj", "langsam", "slow", tags="rare")
+        await graduate_word(db, w1, USER_ID)
+        await graduate_word(db, w2, USER_ID)
         due = await get_due_words(db, USER_ID, limit=7, tag="common")
         assert len(due) == 1
 
     async def test_tag_with_sql_wildcards(self, db):
-        await add_word(db, USER_ID, "adj", "schnell", "fast", tags="a%b")
-        await add_word(db, USER_ID, "adj", "langsam", "slow", tags="axb")
+        from tests.helpers import graduate_word
+
+        w1 = await add_word(db, USER_ID, "adj", "schnell", "fast", tags="a%b")
+        w2 = await add_word(db, USER_ID, "adj", "langsam", "slow", tags="axb")
+        await graduate_word(db, w1, USER_ID)
+        await graduate_word(db, w2, USER_ID)
         due = await get_due_words(db, USER_ID, limit=7, tag="a%b")
         assert len(due) == 1
 
@@ -365,12 +448,18 @@ class TestQuizHistory:
 
 
 class TestStats:
+    async def test_naive_datetime_rejected(self, db):
+        """get_stats must refuse naive datetime — silent UTC/local confusion previously
+        caused 'Today' stats to show wrong totals in Docker (TZ=UTC) vs host."""
+        with pytest.raises(ValueError, match="timezone-aware"):
+            await get_stats(db, USER_ID, datetime.now())
+
     async def test_stats_counts(self, db):
         word_id = await add_word(db, USER_ID, "adj", "schnell", "fast")
         await add_quiz_history(db, USER_ID, word_id, "translate", True)
         await add_quiz_history(db, USER_ID, word_id, "translate", True)
 
-        since = datetime.now() - timedelta(days=1)
+        since = datetime.now(timezone.utc) - timedelta(days=1)
         stats = await get_stats(db, USER_ID, since)
         assert stats["quizzes_completed"] == 2
         assert stats["words_added"] == 1
@@ -387,7 +476,7 @@ class TestStats:
         word_id = await add_word(db, USER_ID, "adj", "schnell", "fast")
         await self._mark_learned(db, word_id, ["translate", "multiple_choice"])
 
-        since = datetime.now() - timedelta(days=1)
+        since = datetime.now(timezone.utc) - timedelta(days=1)
         stats = await get_stats(db, USER_ID, since)
         assert stats["words_learned"] == 1
 
@@ -396,7 +485,7 @@ class TestStats:
         word_id = await add_word(db, USER_ID, "adj", "schnell", "fast")
         await self._mark_learned(db, word_id, ["translate"])
 
-        since = datetime.now() - timedelta(days=1)
+        since = datetime.now(timezone.utc) - timedelta(days=1)
         stats = await get_stats(db, USER_ID, since)
         assert stats["words_learned"] == 0
 
@@ -405,7 +494,7 @@ class TestStats:
         word_id = await add_word(db, USER_ID, "n", "Katze", "cat", article="die", plural="Katzen")
         await self._mark_learned(db, word_id, ["translate", "multiple_choice", "article"])
 
-        since = datetime.now() - timedelta(days=1)
+        since = datetime.now(timezone.utc) - timedelta(days=1)
         stats = await get_stats(db, USER_ID, since)
         assert stats["words_learned"] == 1
 
@@ -414,7 +503,7 @@ class TestStats:
         word_id = await add_word(db, USER_ID, "n", "Katze", "cat", article="die", plural="Katzen")
         await self._mark_learned(db, word_id, ["translate", "multiple_choice"])
 
-        since = datetime.now() - timedelta(days=1)
+        since = datetime.now(timezone.utc) - timedelta(days=1)
         stats = await get_stats(db, USER_ID, since)
         assert stats["words_learned"] == 0
 
@@ -431,7 +520,7 @@ class TestStats:
         )
         await self._mark_learned(db, word_id, ["translate", "multiple_choice", "verb_forms"])
 
-        since = datetime.now() - timedelta(days=1)
+        since = datetime.now(timezone.utc) - timedelta(days=1)
         stats = await get_stats(db, USER_ID, since)
         assert stats["words_learned"] == 1
 
@@ -448,12 +537,12 @@ class TestStats:
         await db.commit()
 
         # Period is "last week" \u2014 should NOT count
-        since = datetime.now() - timedelta(days=7)
+        since = datetime.now(timezone.utc) - timedelta(days=7)
         stats = await get_stats(db, USER_ID, since)
         assert stats["words_learned"] == 0
 
         # Period is "all time" \u2014 SHOULD count
-        epoch = datetime(1970, 1, 1)
+        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
         stats = await get_stats(db, USER_ID, epoch)
         assert stats["words_learned"] == 1
 

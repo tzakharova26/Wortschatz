@@ -148,11 +148,17 @@ class TestWordScore:
 
 class TestSelectQuizType:
     def test_noun_types(self):
-        word = _make_word()
+        word = _make_word()  # has article + plural
         types_seen = set()
         for _ in range(100):
             types_seen.add(select_quiz_type(word))
-        assert types_seen <= {"translate", "multiple_choice", "article"}
+        assert types_seen <= {"translate", "multiple_choice", "article", "plural"}
+
+    def test_noun_without_plural_excludes_plural(self):
+        word = _make_word()
+        word["plural"] = None
+        for _ in range(50):
+            assert select_quiz_type(word) != "plural"
 
     def test_regular_verb_no_verb_forms(self):
         word = _make_verb(irregular=False)
@@ -297,6 +303,24 @@ class TestGenerateQuestion:
         word = _make_word(article=None)
         q = generate_question(word, "article", [word])
         assert q.quiz_type == "translate"  # fallback
+
+    def test_plural_quiz(self):
+        word = _make_word(german="Katze", article="die", plural="Katzen", translation="cat")
+        q = generate_question(word, "plural", [word])
+        assert q.quiz_type == "plural"
+        assert q.options is None
+        assert q.correct_answer == "Katzen"
+        assert "die Katze" in q.prompt
+
+    def test_plural_quiz_no_plural_falls_back(self):
+        word = _make_word(plural=None)
+        q = generate_question(word, "plural", [word])
+        assert q.quiz_type == "translate"  # fallback when no plural
+
+    def test_plural_quiz_empty_plural_falls_back(self):
+        word = _make_word(plural="   ")
+        q = generate_question(word, "plural", [word])
+        assert q.quiz_type == "translate"
 
     def test_verb_forms_quiz(self):
         word = _make_verb(irregular=True)

@@ -19,7 +19,8 @@ Wortschatz/
     main.py            # Entry point, application setup
     handlers.py        # Telegram command & message handlers
     database.py        # Database models and queries
-    quiz.py            # Quiz logic, question generation
+    quiz.py            # Quiz logic, question generation (revision flow)
+    learn.py           # Learning flow (massed drill for new words, graduation into SM-2)
     sm2.py             # SM-2 spaced repetition algorithm
     stats.py           # Statistics formatting
     umlaut.py          # Umlaut conversion utilities
@@ -28,9 +29,11 @@ Wortschatz/
   tests/
     __init__.py
     conftest.py        # Shared fixtures (in-memory DB, fake update/context)
+    helpers.py         # Test helpers (e.g. graduate_word to seed /quiz pool)
     test_database.py
     test_sm2.py
     test_quiz.py
+    test_learn.py
     test_umlaut.py
     test_handlers.py
     test_stats.py
@@ -143,6 +146,7 @@ QUIZ_TYPE_WEIGHTS = {
     "verb_forms": 0.9,
     "multiple_choice": 0.6,
     "article": 0.5,
+    "plural": 0.5,
 }
 ```
 
@@ -151,6 +155,7 @@ QUIZ_TYPE_WEIGHTS = {
 2. **multiple_choice** -- bot shows German word + buttons with translation options; wrong options from same POS, fallback to all vocabulary. Buttons in Telegram.
 3. **article** -- nouns only: bot shows noun without article, user picks der/die/das buttons.
 4. **verb_forms** -- irregular verbs only: bot shows infinitive + which form to type (e.g. "du"), user types the form. Form is randomly picked from stored irregular_forms JSON.
+5. **plural** -- nouns with a non-empty plural only: bot shows article + singular ("die Katze"), user types the plural form ("Katzen"). Typed input with umlaut tolerance.
 
 ### Multiple Choice Option Filling
 1. Try same POS words from user's vocabulary (3 wrong options needed)
@@ -225,7 +230,7 @@ Input format unchanged; positions parsed as ich, du, er by default. JSON storage
 
 ### "Learned" Definition (for stats only)
 A word is considered **learned** when all applicable quiz types have been passed at least **4 times total**:
-- Noun: quizzes 1, 2, 3 (translation, multiple choice, article)
+- Noun: quizzes 1, 2, 3, 5 (translation, multiple choice, article, plural). Nouns without a plural skip 5.
 - Regular verb: quizzes 1, 2 (translation, multiple choice)
 - Irregular verb: quizzes 1, 2, 4 (translation, multiple choice, verb forms)
 - Adjective/Adverb: quizzes 1, 2 (translation, multiple choice)
@@ -240,7 +245,8 @@ A word is considered **learned** when all applicable quiz types have been passed
 | `/list <tag>` | List words filtered by tag. Tag is **required**; truncated to LIST_MAX_WORDS=40. |
 | `/tags` | List all existing tags |
 | `/delete <word>` | Delete a word card by its German text (umlaut-aware). Confirms via `/delete_confirm` if multiple matches. |
-| `/quiz [N] [tag]` | Start a quiz: `N` questions (default 7, capped at QUIZ_MAX_SIZE=50), optional tag filter. Args order-independent. If due words < N, the session cycles through them with new quiz types. |
+| `/quiz [N] [tag]` | Start a quiz: `N` questions (default 7, capped at QUIZ_MAX_SIZE=50), optional tag filter. Args order-independent. If due words < N, the session cycles through them with new quiz types. **Excludes words still in the `/learn` pool.** |
+| `/learn [N] [tag]` | Massed-drill flow for new (or Blackout-flagged) words. Per word: show card → MC → typed → (article + plural for nouns / two verb forms for irregular verbs). Wrong steps retry once at session end; a word graduates only when all required steps pass. Graduation seeds SM-2 with synthetic Good ratings per applicable quiz type. Capped at `LEARN_MAX_SIZE=10`. |
 | `/stats` | Show learning statistics (today / week / month / overall) |
 | `/remindme HH:MM [tz]` | Add a daily quiz reminder. Default timezone is `Europe/Berlin`. Multiple reminders per user supported. |
 | `/reminders` | List user's reminders with each one's source time and Berlin/Moscow equivalents. |
@@ -283,6 +289,7 @@ CREATE TABLE sm2_state (
     repetitions INTEGER DEFAULT 0,
     correct_count INTEGER DEFAULT 0,
     next_review TIMESTAMP,
+    last_quality INTEGER,           -- 0-5; NULL until first answer. last_quality=0 (Blackout) demotes word into /learn pool.
     FOREIGN KEY (word_id) REFERENCES words(id) ON DELETE CASCADE,
     UNIQUE(user_id, word_id, quiz_type)
 );
@@ -379,4 +386,5 @@ The `data/` directory is mounted as a persistent Docker volume (`bot-data:/app/d
 - [x] Preposition POS (`prep`)
 - [x] Configurable quiz size (`/quiz [N] [tag]`) with cycling for small vocabularies
 - [x] Daily reminders with multi-timezone support (`/remindme`, `/reminders`, `/remindoff`)
+- [x] Learning flow (`/learn`): massed drill for brand-new and Blackout-flagged words; graduates into `/quiz` via synthetic Good rating; post-`/add` "Start learning" button; `last_quality` column on `sm2_state`
 - [ ] AI-powered features (context sentences, grammar tips, smart corrections)

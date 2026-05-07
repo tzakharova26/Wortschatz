@@ -3,11 +3,23 @@ QUIZ_MAX_SIZE = 50  # upper bound on user-requested quiz size
 QUIZ_TEMPERATURE = 0.3
 LIST_MAX_WORDS = 40
 
+# /learn batches are heavier per word (4-5 steps), so cap is lower than /quiz.
+LEARN_MAX_SIZE = 10
+
+LEARN_START_MESSAGE = (
+    "Learning {n} word(s). Each word steps through:\n"
+    "  1. See the card  2. Multiple choice  3. Type it\n"
+    "  + article and plural (nouns) or two verb forms (irregular verbs)\n\n"
+    "Wrong steps are retried at the end. A word graduates only after every "
+    "step is correct — graduated words become eligible for /quiz."
+)
+
 QUIZ_TYPE_WEIGHTS: dict[str, float] = {
     "translate": 1.0,
     "verb_forms": 0.9,
     "multiple_choice": 0.6,
     "article": 0.5,
+    "plural": 0.5,
 }
 
 # Self-rating quality scores (SM-2 scale 0-5)

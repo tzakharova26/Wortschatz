@@ -147,6 +147,8 @@ def generate_question(
         return _generate_article(word)
     elif quiz_type == "verb_forms":
         return _generate_verb_forms(word)
+    elif quiz_type == "plural":
+        return _generate_plural(word)
     else:
         log_user_warning(
             logger,
@@ -219,6 +221,25 @@ def _generate_article(word: dict) -> QuizQuestion:
         prompt=f"What is the article for '{word['german']}'?",
         options=["der", "die", "das"],
         correct_answer=article,
+    )
+
+
+def _generate_plural(word: dict) -> QuizQuestion:
+    """Plural quiz (nouns only): show the singular with article, user types the plural."""
+    plural = word.get("plural")
+    if not plural or not plural.strip():
+        log_user_warning(
+            logger,
+            word.get("user_id", 0),
+            f"Plural quiz for '{word['german']}' without plural, falling back to translate",
+        )
+        return _generate_translate(word)
+    return QuizQuestion(
+        word=word,
+        quiz_type="plural",
+        prompt=f"What is the plural of '{german_with_article(word)}'?",
+        options=None,
+        correct_answer=plural,
     )
 
 
@@ -329,6 +350,9 @@ def format_summary(session: QuizSession) -> str:
             answer_safe = html.escape(question.correct_answer)
             form_safe = html.escape(question.verb_form_key)
             lines.append(f"{mark} {german_safe} ({form_safe}) — {answer_safe}")
+        elif question.quiz_type == "plural":
+            answer_safe = html.escape(question.correct_answer)
+            lines.append(f"{mark} {german_safe} (plural) — {answer_safe}")
         else:
             lines.append(f"{mark} {german_safe} — {translation_safe}")
     return "\n".join(lines)
@@ -339,34 +363,56 @@ async def apply_results(conn, session: QuizSession) -> int:
 
     Skips misspells (None entries). Returns the number of questions whose update
     failed; the caller decides how to surface that to the user.
+
+    Atomicity: each (sm2_state upsert, quiz_history insert) pair runs inside a
+    SAVEPOINT, and the whole batch sits inside one transaction with a single
+    final COMMIT. A row-level exception rolls back just that pair; a process
+    crash before COMMIT loses the whole batch (clean retry on restart).
     """
     user_id = session.user_id
     failures = 0
-    for i, question in enumerate(session.questions):
-        if i >= len(session.results):
-            break
-        result = session.results[i]
-        if result is None:
-            continue
-        quality, correct = result
-        word_id = question.word["id"]
-        quiz_type = question.quiz_type
-        try:
-            row = await get_sm2_state(conn, user_id, word_id, quiz_type)
-            new_state = calculate_sm2(sm2_from_db(row, user_id), quality)
-            await upsert_sm2_state(
-                conn,
-                user_id,
-                word_id,
-                quiz_type,
-                new_state.easiness_factor,
-                new_state.interval,
-                new_state.repetitions,
-                new_state.correct_count,
-                new_state.next_review,
-            )
-            await add_quiz_history(conn, user_id, word_id, quiz_type, correct)
-        except Exception:
-            failures += 1
-            log_user_error(logger, user_id, f"Failed to apply quiz result for word_id={word_id}")
+    await conn.execute("BEGIN")
+    try:
+        for i, question in enumerate(session.questions):
+            if i >= len(session.results):
+                break
+            result = session.results[i]
+            if result is None:
+                continue
+            quality, correct = result
+            word_id = question.word["id"]
+            quiz_type = question.quiz_type
+            sp = f"q{i}"
+            await conn.execute(f"SAVEPOINT {sp}")
+            try:
+                row = await get_sm2_state(conn, user_id, word_id, quiz_type)
+                new_state = calculate_sm2(sm2_from_db(row, user_id), quality)
+                await upsert_sm2_state(
+                    conn,
+                    user_id,
+                    word_id,
+                    quiz_type,
+                    new_state.easiness_factor,
+                    new_state.interval,
+                    new_state.repetitions,
+                    new_state.correct_count,
+                    new_state.next_review,
+                    last_quality=quality,
+                    commit=False,
+                )
+                await add_quiz_history(conn, user_id, word_id, quiz_type, correct, commit=False)
+                await conn.execute(f"RELEASE SAVEPOINT {sp}")
+            except Exception:
+                await conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+                await conn.execute(f"RELEASE SAVEPOINT {sp}")
+                failures += 1
+                log_user_error(
+                    logger, user_id, f"Failed to apply quiz result for word_id={word_id}"
+                )
+        await conn.commit()
+    except Exception:
+        # Anything outside the per-row savepoints (BEGIN/COMMIT itself) — rollback the
+        # whole batch and re-raise so the caller knows nothing landed.
+        await conn.rollback()
+        raise
     return failures

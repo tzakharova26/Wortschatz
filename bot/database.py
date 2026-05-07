@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS sm2_state (
     repetitions INTEGER DEFAULT 0,
     correct_count INTEGER DEFAULT 0,
     next_review TIMESTAMP,
+    last_quality INTEGER,
     FOREIGN KEY (word_id) REFERENCES words(id) ON DELETE CASCADE,
     UNIQUE(user_id, word_id, quiz_type)
 );
@@ -69,9 +70,11 @@ CREATE INDEX IF NOT EXISTS idx_reminders_user_id ON reminders(user_id);
 """
 
 VALID_PARTS_OF_SPEECH = {"n", "v", "adj", "adv", "prep"}
-VALID_QUIZ_TYPES = {"translate", "multiple_choice", "article", "verb_forms"}
+VALID_QUIZ_TYPES = {"translate", "multiple_choice", "article", "verb_forms", "plural"}
 
-# Mapping: part_of_speech -> list of applicable quiz types
+# Mapping: part_of_speech -> list of applicable quiz types (always-applicable ones).
+# Per-word extras (verb_forms for irregular verbs, plural for nouns that actually
+# have a plural form) are added in get_quiz_types_for_word.
 APPLICABLE_QUIZ_TYPES: dict[str, list[str]] = {
     "n": ["translate", "multiple_choice", "article"],
     "v": ["translate", "multiple_choice"],  # regular verbs
@@ -82,6 +85,7 @@ APPLICABLE_QUIZ_TYPES: dict[str, list[str]] = {
 
 # Irregular verbs (those with ich/du/er forms) also get "verb_forms"
 VERB_FORMS_QUIZ = "verb_forms"
+PLURAL_QUIZ = "plural"
 
 
 def get_quiz_types_for_word(word: dict) -> list[str]:
@@ -92,6 +96,10 @@ def get_quiz_types_for_word(word: dict) -> list[str]:
         forms = parse_irregular_forms(word.get("irregular_forms"))
         if forms:
             types.append(VERB_FORMS_QUIZ)
+    elif pos == "n":
+        plural = word.get("plural")
+        if plural and plural.strip():
+            types.append(PLURAL_QUIZ)
     return types
 
 
@@ -149,6 +157,7 @@ async def init_db(db_path: str = DB_PATH) -> None:
     try:
         conn = await get_connection(db_path)
         await conn.executescript(SCHEMA)
+        await _migrate(conn)
         await conn.commit()
         logger.info("Database initialized", extra={"user_id": "system"})
     except Exception:
@@ -157,6 +166,20 @@ async def init_db(db_path: str = DB_PATH) -> None:
     finally:
         if conn is not None:
             await conn.close()
+
+
+async def _migrate(conn: aiosqlite.Connection) -> None:
+    """Idempotent migrations for schema changes that need to be applied to
+    pre-existing DBs. Adding a column is safe to run repeatedly because we
+    inspect PRAGMA table_info first."""
+    cursor = await conn.execute("PRAGMA table_info(sm2_state)")
+    cols = {row[1] for row in await cursor.fetchall()}
+    if "last_quality" not in cols:
+        await conn.execute("ALTER TABLE sm2_state ADD COLUMN last_quality INTEGER")
+        logger.info(
+            "Migration: added sm2_state.last_quality column",
+            extra={"user_id": "system"},
+        )
 
 
 # --- Words ---
@@ -349,22 +372,32 @@ async def upsert_sm2_state(
     repetitions: int,
     correct_count: int,
     next_review: datetime,
+    last_quality: int | None = None,
+    commit: bool = True,
 ) -> None:
+    """Upsert one SM-2 row.
+
+    Pass ``commit=False`` when calling inside a bulk-apply loop (apply_results,
+    apply_graduations) so all rows land in a single transaction; the caller
+    issues one commit at the end. Default behaviour preserves the per-row
+    commit for ad-hoc callers and tests.
+    """
     if quiz_type not in VALID_QUIZ_TYPES:
         raise ValueError(f"Invalid quiz_type: {quiz_type!r}")
 
     await conn.execute(
         """INSERT INTO sm2_state
            (user_id, word_id, quiz_type, easiness_factor, interval, repetitions,
-            correct_count, next_review)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            correct_count, next_review, last_quality)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(user_id, word_id, quiz_type)
            DO UPDATE SET
              easiness_factor = excluded.easiness_factor,
              interval = excluded.interval,
              repetitions = excluded.repetitions,
              correct_count = excluded.correct_count,
-             next_review = excluded.next_review""",
+             next_review = excluded.next_review,
+             last_quality = excluded.last_quality""",
         (
             user_id,
             word_id,
@@ -374,15 +407,32 @@ async def upsert_sm2_state(
             repetitions,
             correct_count,
             next_review.isoformat(),
+            last_quality,
         ),
     )
-    await conn.commit()
+    if commit:
+        await conn.commit()
     log_user_action(
         logger,
         user_id,
         f"Updated SM2 state: word_id={word_id}, type={quiz_type}, "
-        f"ef={easiness_factor:.2f}, interval={interval}, reps={repetitions}",
+        f"ef={easiness_factor:.2f}, interval={interval}, reps={repetitions}, "
+        f"last_quality={last_quality}",
     )
+
+
+_NOT_LEARNING_CLAUSE = """
+    EXISTS (
+      SELECT 1 FROM quiz_history h
+      WHERE h.word_id = w.id AND h.user_id = w.user_id
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM sm2_state sb
+      WHERE sb.word_id = w.id AND sb.user_id = w.user_id AND sb.last_quality = 0
+    )
+"""
+
+_NEEDS_LEARNING_CLAUSE = f"NOT ({_NOT_LEARNING_CLAUSE})"
 
 
 async def get_due_words(
@@ -393,33 +443,79 @@ async def get_due_words(
 ) -> list[dict]:
     """Get words most due for review. Returns words with earliest next_review first.
 
-    Words without SM2 state (never reviewed) are prioritized.
+    Excludes words in the "needs learning" pool (no quiz history yet, or last
+    answer was Blackout) — those belong to /learn.
     """
+    # Note: f-strings here only interpolate the module-level _NOT_LEARNING_CLAUSE
+    # constant, never user input. The S608 lint is a false positive on this shape.
     if tag:
         escaped_tag = _escape_like(tag)
-        query = """
+        query = f"""
             SELECT w.*, MIN(COALESCE(s.next_review, '1970-01-01')) as earliest_review
             FROM words w
             LEFT JOIN sm2_state s ON w.id = s.word_id AND s.user_id = w.user_id
             WHERE w.user_id = ?
               AND (',' || w.tags || ',') LIKE ? ESCAPE '\\'
+              AND {_NOT_LEARNING_CLAUSE}
             GROUP BY w.id
             ORDER BY earliest_review ASC
             LIMIT ?
-        """
+        """  # noqa: S608
         cursor = await conn.execute(query, (user_id, f"%,{escaped_tag},%", limit))
     else:
-        query = """
+        query = f"""
             SELECT w.*, MIN(COALESCE(s.next_review, '1970-01-01')) as earliest_review
             FROM words w
             LEFT JOIN sm2_state s ON w.id = s.word_id AND s.user_id = w.user_id
             WHERE w.user_id = ?
+              AND {_NOT_LEARNING_CLAUSE}
             GROUP BY w.id
             ORDER BY earliest_review ASC
             LIMIT ?
-        """
+        """  # noqa: S608
         cursor = await conn.execute(query, (user_id, limit))
 
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def get_needs_learning_words(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    limit: int | None = None,
+    tag: str | None = None,
+    word_ids: list[int] | None = None,
+) -> list[dict]:
+    """Words eligible for /learn: never quizzed yet, or any SM-2 row has last_quality=0
+    (Blackout demotes a word back into the learning pool).
+
+    Most-recently-added first.
+    """
+    where = ["w.user_id = ?", _NEEDS_LEARNING_CLAUSE]
+    params: list = [user_id]
+
+    if tag:
+        escaped_tag = _escape_like(tag)
+        where.append("(',' || w.tags || ',') LIKE ? ESCAPE '\\'")
+        params.append(f"%,{escaped_tag},%")
+
+    if word_ids:
+        placeholders = ",".join("?" for _ in word_ids)
+        where.append(f"w.id IN ({placeholders})")
+        params.extend(word_ids)
+
+    # The interpolated pieces (where clauses + IN-placeholders) are constants /
+    # `?` placeholders only, no user-supplied SQL. S608 is a false positive here.
+    query = f"""
+        SELECT w.* FROM words w
+        WHERE {" AND ".join(where)}
+        ORDER BY w.added_at DESC, w.id DESC
+    """  # noqa: S608
+    if limit is not None:
+        query += " LIMIT ?"
+        params.append(limit)
+
+    cursor = await conn.execute(query, tuple(params))
     rows = await cursor.fetchall()
     return [dict(row) for row in rows]
 
@@ -433,7 +529,13 @@ async def add_quiz_history(
     word_id: int,
     quiz_type: str,
     correct: bool,
+    commit: bool = True,
 ) -> None:
+    """Append one quiz_history row.
+
+    Pass ``commit=False`` from bulk-apply loops; see ``upsert_sm2_state`` for
+    the same pattern.
+    """
     if quiz_type not in VALID_QUIZ_TYPES:
         raise ValueError(f"Invalid quiz_type: {quiz_type!r}")
 
@@ -442,7 +544,8 @@ async def add_quiz_history(
            VALUES (?, ?, ?, ?)""",
         (user_id, word_id, quiz_type, 1 if correct else 0),
     )
-    await conn.commit()
+    if commit:
+        await conn.commit()
     log_user_action(
         logger,
         user_id,
@@ -453,17 +556,19 @@ async def add_quiz_history(
 async def get_stats(conn: aiosqlite.Connection, user_id: int, since: datetime) -> dict:
     """Get statistics since a given date.
 
-    `since` is interpreted as local time (matching `datetime.now()` callers); it is
-    converted to UTC for comparison against SQLite's CURRENT_TIMESTAMP values.
+    `since` MUST be timezone-aware. SQLite's CURRENT_TIMESTAMP is UTC; we convert
+    `since` to UTC and format with a space separator so string comparison against
+    DB values works (Python's isoformat() uses 'T', which sorts AFTER space and
+    breaks same-date comparisons — past pain).
+
+    Raises ValueError on naive input rather than silently mis-interpreting it.
     """
-    # SQLite CURRENT_TIMESTAMP returns UTC formatted as "YYYY-MM-DD HH:MM:SS".
-    # Match that format so string comparison aligns (T vs space ordering would otherwise
-    # break same-date comparisons).
-    if since.tzinfo is not None:
-        since_utc = since.astimezone(timezone.utc).replace(tzinfo=None)
-    else:
-        # Naive: treat as local, convert to UTC to match what the DB stores.
-        since_utc = since.astimezone(timezone.utc).replace(tzinfo=None)
+    if since.tzinfo is None:
+        raise ValueError(
+            "get_stats requires a timezone-aware datetime; got naive (would be "
+            "interpreted as system TZ which differs between Docker UTC and the host)"
+        )
+    since_utc = since.astimezone(timezone.utc).replace(tzinfo=None)
     since_str = since_utc.strftime("%Y-%m-%d %H:%M:%S")
 
     # Quizzes completed

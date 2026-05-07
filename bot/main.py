@@ -10,6 +10,7 @@ from bot.handlers import (
     delete_confirm_command,
     error_handler,
     get_add_conversation,
+    get_learn_conversation,
     get_quiz_conversation,
     help_callback,
     help_command,
@@ -56,8 +57,12 @@ def main() -> None:
         ApplicationBuilder().token(token).post_init(post_init).post_shutdown(post_shutdown).build()
     )
 
-    # Conversation handlers (must be added before simple handlers)
+    # Conversation handlers (must be added before simple handlers).
+    # Learn must come after add: the post-/add 'Start learning' button is a
+    # CallbackQueryHandler entry-point on the learn conversation, but it fires
+    # only after the /add conversation has already ended.
     app.add_handler(get_add_conversation())
+    app.add_handler(get_learn_conversation())
     app.add_handler(get_quiz_conversation())
 
     # Simple commands

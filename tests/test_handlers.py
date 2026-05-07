@@ -1030,12 +1030,26 @@ class TestQuizConversation:
     async def test_quiz_start_with_words(self, fake_update, fake_context, db):
         from bot.database import add_word
         from bot.handlers import QUIZ_ANSWERING, quiz_start
+        from tests.helpers import graduate_word
 
-        await add_word(db, 12345, "adj", "schnell", "fast")
+        word_id = await add_word(db, 12345, "adj", "schnell", "fast")
+        await graduate_word(db, word_id)  # /quiz only sees graduated words
         upd = fake_update()
         result = await quiz_start(upd, fake_context)
         assert result == QUIZ_ANSWERING
         assert "quiz_session" in fake_context.user_data
+
+    async def test_quiz_skips_brand_new_words(self, fake_update, fake_context, db):
+        """A word with no quiz_history is in /learn pool, not /quiz."""
+        from bot.database import add_word
+        from bot.handlers import ConversationHandler, quiz_start
+
+        await add_word(db, 12345, "adj", "schnell", "fast")
+        upd = fake_update()
+        result = await quiz_start(upd, fake_context)
+        assert result == ConversationHandler.END
+        text = upd.message.reply_text.call_args.args[0]
+        assert "No words to quiz" in text
 
     async def test_text_answer_no_session(self, fake_update, fake_context):
         from bot.handlers import ConversationHandler, quiz_text_answer
@@ -1054,8 +1068,10 @@ class TestQuizConversation:
             quiz_start,
             quiz_text_answer,
         )
+        from tests.helpers import graduate_word
 
         word_id = await add_word(db, 12345, "adj", "schnell", "fast")
+        await graduate_word(db, word_id)
         upd = fake_update()
         await quiz_start(upd, fake_context)
 
@@ -1081,10 +1097,12 @@ class TestQuizConversation:
         result = await quiz_rating(upd_rate, fake_context)
         assert result == ConversationHandler.END
 
-        # Verify SM-2 was persisted
+        # Verify SM-2 was persisted (graduate_word seeded correct_count=1, then
+        # one more correct answer makes it 2). The intent is just that the rating
+        # round-tripped to the DB.
         state = await get_sm2_state(db, 12345, word_id, q.quiz_type)
         assert state is not None
-        assert state["correct_count"] == 1
+        assert state["correct_count"] >= 2
 
     async def test_quiz_cancel_no_session(self, fake_update, fake_context):
         from bot.handlers import ConversationHandler, quiz_cancel
@@ -1154,8 +1172,10 @@ class TestQuizConversation:
         """Re-entering /quiz should clear any stale session state from a previous run."""
         from bot.database import add_word
         from bot.handlers import quiz_start
+        from tests.helpers import graduate_word
 
-        await add_word(db, 12345, "adj", "schnell", "fast")
+        word_id = await add_word(db, 12345, "adj", "schnell", "fast")
+        await graduate_word(db, word_id)
         # Pretend a previous session was abandoned
         fake_context.user_data["quiz_session"] = "stale-session"
         fake_context.user_data["quiz_all_words"] = [{"stale": True}]
@@ -1171,8 +1191,10 @@ class TestQuizConversation:
         """`/quiz 5` with 1 word in vocab cycles to 5 questions."""
         from bot.database import add_word
         from bot.handlers import quiz_start
+        from tests.helpers import graduate_word
 
-        await add_word(db, 12345, "adj", "schnell", "fast")
+        word_id = await add_word(db, 12345, "adj", "schnell", "fast")
+        await graduate_word(db, word_id)
         fake_context.args = ["5"]
         upd = fake_update()
         await quiz_start(upd, fake_context)
@@ -1183,9 +1205,12 @@ class TestQuizConversation:
         """`/quiz 3 animals` filters by tag and uses requested size."""
         from bot.database import add_word
         from bot.handlers import quiz_start
+        from tests.helpers import graduate_word
 
-        await add_word(db, 12345, "adj", "schnell", "fast", tags="animals")
-        await add_word(db, 12345, "adj", "langsam", "slow", tags="other")
+        w1 = await add_word(db, 12345, "adj", "schnell", "fast", tags="animals")
+        w2 = await add_word(db, 12345, "adj", "langsam", "slow", tags="other")
+        await graduate_word(db, w1)
+        await graduate_word(db, w2)
         fake_context.args = ["3", "animals"]
         upd = fake_update()
         await quiz_start(upd, fake_context)
@@ -1198,8 +1223,10 @@ class TestQuizConversation:
         """`/quiz animals 3` parses the same as `/quiz 3 animals`."""
         from bot.database import add_word
         from bot.handlers import quiz_start
+        from tests.helpers import graduate_word
 
-        await add_word(db, 12345, "adj", "schnell", "fast", tags="animals")
+        word_id = await add_word(db, 12345, "adj", "schnell", "fast", tags="animals")
+        await graduate_word(db, word_id)
         fake_context.args = ["animals", "3"]
         upd = fake_update()
         await quiz_start(upd, fake_context)
@@ -1211,8 +1238,10 @@ class TestQuizConversation:
         from bot.config import QUIZ_MAX_SIZE
         from bot.database import add_word
         from bot.handlers import quiz_start
+        from tests.helpers import graduate_word
 
-        await add_word(db, 12345, "adj", "schnell", "fast")
+        word_id = await add_word(db, 12345, "adj", "schnell", "fast")
+        await graduate_word(db, word_id)
         fake_context.args = [str(QUIZ_MAX_SIZE + 100)]
         upd = fake_update()
         await quiz_start(upd, fake_context)
@@ -1238,8 +1267,10 @@ class TestQuizConversation:
         """Start message tells the user words will repeat when vocab < size."""
         from bot.database import add_word
         from bot.handlers import quiz_start
+        from tests.helpers import graduate_word
 
-        await add_word(db, 12345, "adj", "schnell", "fast")
+        word_id = await add_word(db, 12345, "adj", "schnell", "fast")
+        await graduate_word(db, word_id)
         fake_context.args = ["10"]
         upd = fake_update()
         await quiz_start(upd, fake_context)
@@ -1268,8 +1299,10 @@ class TestQuizConversation:
             quiz_text_answer,
         )
         from bot.quiz import _generate_translate
+        from tests.helpers import graduate_word
 
-        await add_word(db, 12345, "adj", "schnell", "fast")
+        word_id = await add_word(db, 12345, "adj", "schnell", "fast")
+        await graduate_word(db, word_id)
         upd = fake_update()
         await quiz_start(upd, fake_context)
         session = fake_context.user_data["quiz_session"]
@@ -1432,9 +1465,12 @@ class TestFinishQuizPartialFailure:
         """If one upsert raises, the summary still includes a note about failures."""
         import bot.handlers as h
         from bot.database import add_word
+        from tests.helpers import graduate_word
 
         wid1 = await add_word(db, 12345, "adj", "schnell", "fast")
-        await add_word(db, 12345, "adj", "langsam", "slow")
+        wid2 = await add_word(db, 12345, "adj", "langsam", "slow")
+        await graduate_word(db, wid1)
+        await graduate_word(db, wid2)
         upd = fake_update()
         await h.quiz_start(upd, fake_context)
         session = fake_context.user_data["quiz_session"]
@@ -1468,6 +1504,106 @@ class TestFinishQuizPartialFailure:
         # Last reply should be the summary including the failure note
         summary = fake_query.callback_query.message.reply_text.call_args.args[0]
         assert "could not be saved" in summary
+
+
+class TestApplyResultsAtomicity:
+    """Per-row (sm2_state + quiz_history) pair must be atomic. If sm2 upsert
+    fails, no quiz_history row should be written for that question — and
+    other questions in the session should still persist normally."""
+
+    async def test_failed_question_writes_neither_sm2_nor_history(self, db, monkeypatch):
+        from bot.database import add_quiz_history, add_word, get_sm2_state
+        from bot.quiz import QuizQuestion, QuizSession, apply_results
+        from tests.helpers import graduate_word
+
+        wid_ok = await add_word(db, 12345, "adj", "schnell", "fast")
+        wid_bad = await add_word(db, 12345, "adj", "langsam", "slow")
+        await graduate_word(db, wid_ok)
+        await graduate_word(db, wid_bad)
+
+        # Snapshot pre-state
+        history_before = await db.execute(
+            "SELECT COUNT(*) FROM quiz_history WHERE user_id = ? AND word_id = ?",
+            (12345, wid_bad),
+        )
+        before_count = (await history_before.fetchone())[0]
+
+        questions = [
+            QuizQuestion(
+                word={
+                    "id": wid_ok,
+                    "user_id": 12345,
+                    "part_of_speech": "adj",
+                    "german": "schnell",
+                    "translation": "fast",
+                    "article": None,
+                    "plural": None,
+                    "partizip_ii": None,
+                    "irregular_forms": None,
+                },
+                quiz_type="translate",
+                prompt="x",
+                options=None,
+                correct_answer="schnell",
+            ),
+            QuizQuestion(
+                word={
+                    "id": wid_bad,
+                    "user_id": 12345,
+                    "part_of_speech": "adj",
+                    "german": "langsam",
+                    "translation": "slow",
+                    "article": None,
+                    "plural": None,
+                    "partizip_ii": None,
+                    "irregular_forms": None,
+                },
+                quiz_type="translate",
+                prompt="x",
+                options=None,
+                correct_answer="langsam",
+            ),
+        ]
+        session = QuizSession(
+            user_id=12345, questions=questions, current_index=2, results=[(4, True), (4, True)]
+        )
+
+        # Patch upsert to fail only for the bad word — quiz_history should NOT
+        # be written for that word either (savepoint rollback proves atomicity).
+        import bot.quiz as q
+
+        original_upsert = q.upsert_sm2_state
+
+        async def failing_upsert(conn, user_id, word_id, *args, **kwargs):
+            if word_id == wid_bad:
+                raise RuntimeError("boom")
+            return await original_upsert(conn, user_id, word_id, *args, **kwargs)
+
+        monkeypatch.setattr(q, "upsert_sm2_state", failing_upsert)
+        failures = await apply_results(db, session)
+        assert failures == 1
+
+        # Bad word: sm2_state NOT updated (graduate_word's last_quality=4 still there)
+        bad_state = await get_sm2_state(db, 12345, wid_bad, "translate")
+        assert bad_state is not None
+        # Bad word: NO new quiz_history row appended
+        history_after = await db.execute(
+            "SELECT COUNT(*) FROM quiz_history WHERE user_id = ? AND word_id = ?",
+            (12345, wid_bad),
+        )
+        after_count = (await history_after.fetchone())[0]
+        assert after_count == before_count, "quiz_history should not advance for failed word"
+
+        # Good word: history DID advance
+        good_history = await db.execute(
+            "SELECT COUNT(*) FROM quiz_history WHERE user_id = ? AND word_id = ?",
+            (12345, wid_ok),
+        )
+        good_count = (await good_history.fetchone())[0]
+        assert good_count >= 2  # graduate_word seeded 1, apply_results added 1 more
+
+        # Silence unused fixture warning
+        _ = add_quiz_history  # noqa
 
 
 class TestSafeLog:
@@ -1607,3 +1743,166 @@ class TestAddStartClearsStale:
         # parsed_words must be cleared; add_tag is overwritten with the new value
         assert "parsed_words" not in fake_context.user_data
         assert fake_context.user_data["add_tag"] == ""
+
+
+class TestLearnConversation:
+    async def test_learn_start_with_no_eligible_words(self, fake_update, fake_context, db):
+        from bot.handlers import ConversationHandler, learn_start
+
+        upd = fake_update()
+        result = await learn_start(upd, fake_context)
+        assert result == ConversationHandler.END
+        text = upd.message.reply_text.call_args.args[0]
+        assert "Nothing to learn" in text
+
+    async def test_learn_start_builds_session_for_new_word(self, fake_update, fake_context, db):
+        from bot.database import add_word
+        from bot.handlers import LEARN_ANSWERING, learn_start
+
+        await add_word(db, 12345, "adj", "schnell", "fast")
+        upd = fake_update()
+        result = await learn_start(upd, fake_context)
+        assert result == LEARN_ANSWERING
+        session = fake_context.user_data["learn_session"]
+        # adj → 3 steps: show, mc, typed
+        assert len(session.steps) == 3
+
+    async def test_learn_full_pass_graduates_word_into_quiz_pool(
+        self, fake_update, fake_context, db
+    ):
+        """End-to-end: /learn a brand-new word, pass every step, then /quiz finds it."""
+        from bot.database import add_word, get_due_words
+        from bot.handlers import learn_button_answer, learn_start, learn_text_answer
+
+        word_id = await add_word(db, 12345, "adj", "schnell", "fast")
+        # Pre-/learn: word is needs-learning, /quiz pool is empty
+        assert (await get_due_words(db, 12345, limit=10)) == []
+
+        await learn_start(fake_update(), fake_context)
+        session = fake_context.user_data["learn_session"]
+
+        # Step 1: show → tap "Got it"
+        await learn_button_answer(fake_update(callback_data="lshow:ok"), fake_context)
+        # Step 2: MC → tap correct option
+        mc_step = session.steps[1]
+        correct_mc = mc_step.correct_answer
+        await learn_button_answer(fake_update(callback_data=f"lmc:{correct_mc}"), fake_context)
+        # Step 3: typed → send correct answer
+        typed_step = session.steps[2]
+        await learn_text_answer(fake_update(text=typed_step.correct_answer), fake_context)
+
+        # Session ended — word should now be in /quiz pool
+        assert "learn_session" not in fake_context.user_data
+        due = await get_due_words(db, 12345, limit=10)
+        assert [w["id"] for w in due] == [word_id]
+
+    async def test_learn_failure_keeps_word_in_pool(self, fake_update, fake_context, db):
+        """A wrong typed answer (twice — main + retry) leaves the word un-graduated."""
+        from bot.database import add_word, get_due_words, get_needs_learning_words
+        from bot.handlers import learn_button_answer, learn_start, learn_text_answer
+
+        word_id = await add_word(db, 12345, "adj", "schnell", "fast")
+        await learn_start(fake_update(), fake_context)
+        session = fake_context.user_data["learn_session"]
+
+        # show pass
+        await learn_button_answer(fake_update(callback_data="lshow:ok"), fake_context)
+        # MC pass
+        await learn_button_answer(
+            fake_update(callback_data=f"lmc:{session.steps[1].correct_answer}"), fake_context
+        )
+        # typed wrong
+        await learn_text_answer(fake_update(text="wrong-answer"), fake_context)
+        # retry typed: still wrong
+        await learn_text_answer(fake_update(text="still-wrong"), fake_context)
+
+        # Word stays in needs-learning, not in /quiz
+        assert (await get_due_words(db, 12345, limit=10)) == []
+        needs = await get_needs_learning_words(db, 12345)
+        assert [w["id"] for w in needs] == [word_id]
+
+    async def test_learn_batch_callback_uses_pending_ids(self, fake_update, fake_context, db):
+        from bot.database import add_word
+        from bot.handlers import LEARN_ANSWERING, learn_batch_callback
+
+        wid = await add_word(db, 12345, "adj", "schnell", "fast")
+        await add_word(db, 12345, "adj", "langsam", "slow")  # not in pending list
+        fake_context.user_data["pending_learn_ids"] = [wid]
+
+        upd = fake_update(callback_data="lbatch:go")
+        result = await learn_batch_callback(upd, fake_context)
+        assert result == LEARN_ANSWERING
+        session = fake_context.user_data["learn_session"]
+        # Only the pending id should be in the session
+        word_ids_in_session = {s.word["id"] for s in session.steps}
+        assert word_ids_in_session == {wid}
+        # Pending list is consumed
+        assert "pending_learn_ids" not in fake_context.user_data
+
+    async def test_learn_batch_callback_no_pending(self, fake_update, fake_context):
+        from bot.handlers import ConversationHandler, learn_batch_callback
+
+        upd = fake_update(callback_data="lbatch:go")
+        result = await learn_batch_callback(upd, fake_context)
+        assert result == ConversationHandler.END
+        text = upd.callback_query.message.reply_text.call_args.args[0]
+        assert "no longer available" in text.lower()
+
+    async def test_learn_cancel(self, fake_update, fake_context):
+        from bot.handlers import ConversationHandler, learn_cancel
+        from bot.learn import LearnSession
+
+        fake_context.user_data["learn_session"] = LearnSession(
+            user_id=12345, steps=[], required_per_word={}
+        )
+        upd = fake_update()
+        result = await learn_cancel(upd, fake_context)
+        assert result == ConversationHandler.END
+        assert "learn_session" not in fake_context.user_data
+
+    async def test_save_words_attaches_start_learning_button(self, fake_update, fake_context, db):
+        """After /add confirms with new words, the success reply has a Start learning button."""
+        from bot.handlers import CB_LEARN_BATCH, _save_words
+
+        parsed = [
+            {
+                "part_of_speech": "adj",
+                "german": "schnell",
+                "translation": "fast",
+                "article": None,
+                "plural": None,
+                "partizip_ii": None,
+                "irregular_forms": None,
+            }
+        ]
+        upd = fake_update()
+        await _save_words(upd, fake_context, parsed, db, 12345, tag="")
+        markup = upd.message.reply_text.call_args.kwargs.get("reply_markup")
+        assert markup is not None
+        callbacks = {b.callback_data for row in markup.inline_keyboard for b in row}
+        assert any(cb.startswith(CB_LEARN_BATCH) for cb in callbacks)
+        # And the pending IDs were stashed
+        assert fake_context.user_data["pending_learn_ids"]
+
+    async def test_save_words_no_button_if_only_merges(self, fake_update, fake_context, db):
+        """If every word merged into existing rows, no 'Start learning' button is offered."""
+        from bot.database import add_word
+        from bot.handlers import _save_words
+
+        await add_word(db, 12345, "adj", "schnell", "fast", tags="old")
+        parsed = [
+            {
+                "part_of_speech": "adj",
+                "german": "schnell",
+                "translation": "fast",
+                "article": None,
+                "plural": None,
+                "partizip_ii": None,
+                "irregular_forms": None,
+            }
+        ]
+        upd = fake_update()
+        fake_context.user_data["add_tag"] = "new"
+        await _save_words(upd, fake_context, parsed, db, 12345, tag="new")
+        markup = upd.message.reply_text.call_args.kwargs.get("reply_markup")
+        assert markup is None
