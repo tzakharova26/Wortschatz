@@ -52,7 +52,6 @@ from bot.reminders import (
     validate_timezone,
 )
 from bot.stats import get_user_stats
-from bot.umlaut import convert_umlauts
 
 logger = get_logger(__name__)
 
@@ -64,6 +63,7 @@ CB_HELP = "help:"
 CB_MC = "mc:"
 CB_ART = "art:"
 CB_RATE = "rate:"
+CB_ADD = "add:"
 
 ADD_FORMAT_MESSAGE = (
     "Send words, one per line. Fields can be separated by spaces or by | (pipe).\n\n"
@@ -82,7 +82,7 @@ ADD_FORMAT_MESSAGE = (
     "Example: <code>adv manchmal sometimes</code>\n\n"
     "<code>prep word translation</code>  (case info goes in translation)\n"
     "Example: <code>prep mit with (+dat)</code>\n\n"
-    "After parsing, you'll see a preview — send /confirm to save or /cancel to abort."
+    "After parsing, you'll see a preview with Confirm and Cancel buttons."
 )
 
 COMMANDS_HELP = (
@@ -95,10 +95,9 @@ COMMANDS_HELP = (
     "/stats — show learning statistics\n"
     "/remindme HH:MM [tz] — add a daily practice reminder (default Europe/Berlin)\n"
     "/reminders — list your reminders (Berlin/Moscow times)\n"
-    "/remindoff <id|all> — remove a reminder\n"
+    "/remindoff &lt;id|all&gt; — remove a reminder\n"
     "/help — interactive help menu\n"
-    "/confirm — confirm preview during /add\n"
-    "/cancel — cancel current operation"
+    "/cancel — abort an active quiz (partial progress is saved)"
 )
 
 START_MESSAGE = (
@@ -188,9 +187,9 @@ def _parse_noun_line(parts: list[str], safe_line: str) -> tuple[dict | None, str
         return None, f"Noun needs: n article word plural translation: <code>{safe_line}</code>"
     return {
         "part_of_speech": "n",
-        "german": convert_umlauts(parts[2]),
-        "article": convert_umlauts(parts[1]),
-        "plural": convert_umlauts(parts[3]),
+        "german": parts[2],
+        "article": parts[1],
+        "plural": parts[3],
         "partizip_ii": None,
         "irregular_forms": None,
         "translation": " ".join(parts[4:]),
@@ -214,12 +213,12 @@ def _parse_verb_line(
             return None, (
                 f"v needs: v | infinitive | partizip_ii | translation: <code>{safe_line}</code>"
             )
-        partizip_ii = " ".join(convert_umlauts(t) for t in parts[2].split())
+        partizip_ii = parts[2]
         if is_irregular:
             irregular_forms = {
-                "ich": convert_umlauts(parts[3]),
-                "du": convert_umlauts(parts[4]),
-                "er": convert_umlauts(parts[5]),
+                "ich": parts[3],
+                "du": parts[4],
+                "er": parts[5],
             }
             translation = " ".join(parts[6:])
         else:
@@ -239,19 +238,19 @@ def _parse_verb_line(
         if parts[2] in ("ist", "hat"):
             if len(parts) < min_required + 1:
                 return None, f"{label} with ist/hat needs more fields: <code>{safe_line}</code>"
-            partizip_ii = f"{parts[2]} {convert_umlauts(parts[3])}"
+            partizip_ii = f"{parts[2]} {parts[3]}"
             remaining = parts[4:]
         else:
-            partizip_ii = convert_umlauts(parts[2])
+            partizip_ii = parts[2]
             remaining = parts[3:]
 
         if is_irregular:
             if len(remaining) < 4:
                 return None, f"vi needs ich, du, er, translation: <code>{safe_line}</code>"
             irregular_forms = {
-                "ich": convert_umlauts(remaining[0]),
-                "du": convert_umlauts(remaining[1]),
-                "er": convert_umlauts(remaining[2]),
+                "ich": remaining[0],
+                "du": remaining[1],
+                "er": remaining[2],
             }
             translation = " ".join(remaining[3:])
         else:
@@ -262,7 +261,7 @@ def _parse_verb_line(
 
     return {
         "part_of_speech": "v",
-        "german": convert_umlauts(parts[1]),
+        "german": parts[1],
         "article": None,
         "plural": None,
         "partizip_ii": partizip_ii,
@@ -279,7 +278,7 @@ def _parse_simple_line(
         return None, f"{pos} needs: {pos} word translation: <code>{safe_line}</code>"
     return {
         "part_of_speech": pos,
-        "german": convert_umlauts(parts[1]),
+        "german": parts[1],
         "article": None,
         "plural": None,
         "partizip_ii": None,
@@ -436,7 +435,7 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("Usage: /delete german_word")
         return
 
-    german = convert_umlauts(" ".join(context.args))
+    german = " ".join(context.args)
     matches = await find_words_by_german(conn, user_id, german)
 
     if not matches:
@@ -605,6 +604,21 @@ async def remindoff_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 # --- /add conversation ---
 
 
+def _add_cancel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data=f"{CB_ADD}cancel")]])
+
+
+def _add_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Confirm", callback_data=f"{CB_ADD}confirm"),
+                InlineKeyboardButton("Cancel", callback_data=f"{CB_ADD}cancel"),
+            ]
+        ]
+    )
+
+
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     _clear_add_state(context)
@@ -620,6 +634,7 @@ async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         header + ADD_FORMAT_MESSAGE,
         parse_mode="HTML",
+        reply_markup=_add_cancel_keyboard(),
     )
     return ADD_WORDS
 
@@ -641,16 +656,21 @@ async def add_words_received(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if parsed:
             error_text += f"\n\n{len(parsed)} valid line(s) ready."
             error_text += (
-                "\n\nFix errors and resend, /skip to preview valid lines only, or /cancel."
+                "\n\nFix errors and resend, /skip to preview valid lines only, " "or tap Cancel."
             )
         else:
-            error_text += "\n\nFix errors and resend, or /cancel."
-        await update.message.reply_text(error_text, parse_mode="HTML")
+            error_text += "\n\nFix errors and resend, or tap Cancel."
+        await update.message.reply_text(
+            error_text, parse_mode="HTML", reply_markup=_add_cancel_keyboard()
+        )
         context.user_data["parsed_words"] = parsed
         return ADD_WORDS
 
     if not parsed:
-        await update.message.reply_text("No valid words found. Try again or /cancel.")
+        await update.message.reply_text(
+            "No valid words found. Try again or tap Cancel.",
+            reply_markup=_add_cancel_keyboard(),
+        )
         return ADD_WORDS
 
     context.user_data["parsed_words"] = parsed
@@ -667,27 +687,58 @@ async def add_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def _send_preview(update: Update, parsed: list[dict]) -> int:
-    """Render the preview of parsed words and prompt the user to confirm."""
+    """Render the preview of parsed words and prompt the user to confirm via buttons."""
     preview = _format_word_tables(parsed)
     await update.message.reply_text(
         f"Preview ({len(parsed)} word(s)):{preview}\n\n"
-        "Send /confirm to save, /cancel to abort, or send more words to replace this batch.",
+        "Tap Confirm to save, Cancel to abort, or send more words to replace this batch.",
         parse_mode="HTML",
+        reply_markup=_add_confirm_keyboard(),
     )
     return ADD_CONFIRM
 
 
-async def add_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Persist the previewed batch."""
+async def _drop_buttons(query, user_id: int) -> None:
+    """Strip the inline keyboard from the message that owns this callback query.
+
+    Edits can fail (message too old, already edited, etc.) — that's not fatal,
+    so we log at debug and move on.
+    """
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Could not strip keyboard: %s", e, extra={"user_id": user_id})
+
+
+async def add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle the Confirm / Cancel inline buttons in the /add flow."""
+    query = update.callback_query
+    await query.answer()
+    action = query.data.removeprefix(CB_ADD)
     user_id = update.effective_user.id
-    conn = _get_conn(context)
-    tag = context.user_data.get("add_tag", "")
-    parsed = context.user_data.get("parsed_words", [])
-    if not parsed:
-        await update.message.reply_text("Nothing to save. Send /add to start over.")
+
+    if action == "cancel":
+        log_user_action(logger, user_id, "/add cancelled via button")
         _clear_add_state(context)
+        # Drop the buttons so the message stops looking interactive
+        await _drop_buttons(query, user_id)
+        await query.message.reply_text("Add cancelled.")
         return ConversationHandler.END
-    return await _save_words(update, context, parsed, conn, user_id, tag)
+
+    if action == "confirm":
+        log_user_action(logger, user_id, "/add confirmed via button")
+        conn = _get_conn(context)
+        tag = context.user_data.get("add_tag", "")
+        parsed = context.user_data.get("parsed_words", [])
+        await _drop_buttons(query, user_id)
+        if not parsed:
+            await query.message.reply_text("Nothing to save. Send /add to start over.")
+            _clear_add_state(context)
+            return ConversationHandler.END
+        return await _save_words(update, context, parsed, conn, user_id, tag)
+
+    log_user_warning(logger, user_id, f"Unknown /add callback action: {action!r}")
+    return ADD_CONFIRM
 
 
 async def _save_words(update, context, parsed, conn, user_id, tag) -> int:
@@ -731,10 +782,10 @@ async def _save_words(update, context, parsed, conn, user_id, tag) -> int:
             added.append(w)
         except ValueError as e:
             log_user_warning(logger, user_id, f"Failed to add word: {e}")
-            await update.message.reply_text(f"Error: {html.escape(str(e))}")
+            await update.effective_message.reply_text(f"Error: {html.escape(str(e))}")
         except Exception as e:
             log_user_error(logger, user_id, f"DB error adding word '{w.get('german')}': {e}")
-            await update.message.reply_text(
+            await update.effective_message.reply_text(
                 f"Could not save '{html.escape(str(w.get('german', '?')))}'. "
                 "Database error — others may still be saved."
             )
@@ -753,17 +804,11 @@ async def _save_words(update, context, parsed, conn, user_id, tag) -> int:
         parts.append(f"Already existed (no change): {names}")
 
     if not parts:
-        await update.message.reply_text("No words were saved.")
+        await update.effective_message.reply_text("No words were saved.")
     else:
-        await update.message.reply_text("\n\n".join(parts), parse_mode="HTML")
+        await update.effective_message.reply_text("\n\n".join(parts), parse_mode="HTML")
 
     _clear_add_state(context)
-    return ConversationHandler.END
-
-
-async def add_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    _clear_add_state(context)
-    await update.message.reply_text("Add cancelled.")
     return ConversationHandler.END
 
 
@@ -996,10 +1041,25 @@ async def _finish_quiz(query, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def quiz_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Abort an active quiz. Any answered+rated questions are persisted to SM-2
+    and quiz_history before the session is cleared, so partial progress shows up
+    in /stats."""
     user_id = update.effective_user.id
-    log_user_action(logger, user_id, "Quiz cancelled")
+    session = context.user_data.get("quiz_session")
+    rated = sum(1 for r in (session.results if session else []) if r is not None)
+    log_user_action(logger, user_id, f"Quiz cancelled (rated={rated})")
+
+    if session and rated > 0:
+        failures = await apply_results(_get_conn(context), session)
+        summary = format_summary(session)
+        msg = "Quiz cancelled. Partial progress saved.\n\n" + summary
+        if failures:
+            msg += f"\n\n(Note: {failures} result(s) could not be saved due to a database error.)"
+        await update.message.reply_text(msg, parse_mode="HTML")
+    else:
+        await update.message.reply_text("Quiz cancelled.")
+
     _clear_quiz_state(context)
-    await update.message.reply_text("Quiz cancelled.")
     return ConversationHandler.END
 
 
@@ -1028,21 +1088,21 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 def get_add_conversation() -> ConversationHandler:
+    add_cb_handler = CallbackQueryHandler(add_callback, pattern=f"^{CB_ADD}")
     return ConversationHandler(
         entry_points=[CommandHandler("add", add_start)],
         states={
             ADD_WORDS: [
                 CommandHandler("skip", add_skip),
-                CommandHandler("cancel", add_cancel),
+                add_cb_handler,
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_words_received),
             ],
             ADD_CONFIRM: [
-                CommandHandler("confirm", add_confirm),
-                CommandHandler("cancel", add_cancel),
+                add_cb_handler,
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_words_received),
             ],
         },
-        fallbacks=[CommandHandler("cancel", add_cancel)],
+        fallbacks=[],
     )
 
 

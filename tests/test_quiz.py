@@ -257,6 +257,26 @@ class TestGenerateQuestion:
         q = generate_question(words[0], "multiple_choice", words)
         assert len(q.options) == 2
 
+    def test_multiple_choice_prefers_same_pos(self):
+        """When same-POS distractors are sufficient, no other-POS word may appear.
+        Regression: the wrong-pool used to be shuffled together, letting other-POS
+        translations slip in even with plenty of same-POS candidates."""
+        same_pos_words = [
+            _make_word(word_id=1, german="Katze", translation="cat"),
+            _make_word(word_id=2, german="Hund", translation="dog"),
+            _make_word(word_id=3, german="Maus", translation="mouse"),
+            _make_word(word_id=4, german="Vogel", translation="bird"),
+        ]
+        adj_words = [_make_adj(word_id=10 + i) for i in range(5)]
+        all_words = same_pos_words + adj_words
+        same_pos_translations = {w["translation"] for w in same_pos_words}
+        # Run repeatedly because option selection is randomized.
+        for _ in range(50):
+            q = generate_question(same_pos_words[0], "multiple_choice", all_words)
+            assert len(q.options) == 4
+            for opt in q.options:
+                assert opt in same_pos_translations, f"Distractor {opt!r} leaked from another POS"
+
     def test_multiple_choice_dedup_translations(self):
         words = [
             _make_word(word_id=1, german="Katze", translation="cat"),

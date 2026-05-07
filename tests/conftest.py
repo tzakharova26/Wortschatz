@@ -37,6 +37,7 @@ def fake_update():
             upd.callback_query.data = callback_data
             upd.callback_query.answer = AsyncMock()
             upd.callback_query.edit_message_text = AsyncMock()
+            upd.callback_query.edit_message_reply_markup = AsyncMock()
             upd.callback_query.message = MagicMock()
             upd.callback_query.message.reply_text = AsyncMock()
             upd.effective_message = upd.callback_query.message

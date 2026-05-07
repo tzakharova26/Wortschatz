@@ -39,6 +39,12 @@ def setup_logging() -> None:
     root_logger.setLevel(logging.INFO)
     root_logger.addHandler(file_handler)
 
+    # Silence loggers that print URLs containing the bot token. Telegram's API uses
+    # path-based auth (https://api.telegram.org/bot<TOKEN>/...) so every httpx INFO
+    # request log leaks the token. WARNING is enough for those libraries.
+    for noisy in ("httpx", "httpcore", "telegram.request"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
 
 def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)

@@ -1,27 +1,4 @@
-from bot.umlaut import answers_match, convert_umlauts, normalize_for_comparison
-
-
-class TestConvertUmlauts:
-    def test_basic_conversions(self):
-        assert convert_umlauts("faehrt") == "f\u00e4hrt"
-        assert convert_umlauts("schoen") == "sch\u00f6n"
-        assert convert_umlauts("ueber") == "\u00fcber"
-        assert convert_umlauts("Strasse") == "Stra\u00dfe"
-
-    def test_uppercase(self):
-        assert convert_umlauts("Aerger") == "\u00c4rger"
-        assert convert_umlauts("Oesterreich") == "\u00d6sterreich"
-        assert convert_umlauts("Uebung") == "\u00dcbung"
-
-    def test_no_change(self):
-        assert convert_umlauts("Hund") == "Hund"
-        assert convert_umlauts("") == ""
-
-    def test_already_unicode(self):
-        assert convert_umlauts("f\u00e4hrt") == "f\u00e4hrt"
-
-    def test_multiple_umlauts(self):
-        assert convert_umlauts("Maedchen") == "M\u00e4dchen"
+from bot.umlaut import answers_match, normalize_for_comparison
 
 
 class TestNormalizeForComparison:

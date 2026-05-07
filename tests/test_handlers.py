@@ -29,13 +29,19 @@ class TestParseWordLine:
         assert word["irregular_forms"] is None
 
     def test_irregular_verb(self):
+        # Input is preserved exactly \u2014 no auto-umlaut conversion at /add time.
         word, err = _parse_word_line("vi fahren ist gefahren fahre faehrst faehrt to drive")
         assert err is None
         assert word["part_of_speech"] == "v"
         assert word["german"] == "fahren"
         assert word["partizip_ii"] == "ist gefahren"
-        assert word["irregular_forms"] == {"ich": "fahre", "du": "f\u00e4hrst", "er": "f\u00e4hrt"}
+        assert word["irregular_forms"] == {"ich": "fahre", "du": "faehrst", "er": "faehrt"}
         assert word["translation"] == "to drive"
+
+    def test_irregular_verb_preserves_unicode_umlauts(self):
+        word, err = _parse_word_line("vi fahren ist gefahren fahre f\u00e4hrst f\u00e4hrt to drive")
+        assert err is None
+        assert word["irregular_forms"] == {"ich": "fahre", "du": "f\u00e4hrst", "er": "f\u00e4hrt"}
 
     def test_regular_verb_with_long_translation_not_misparsed(self):
         """Regression: 'v gehen ist gegangen to walk on foot' must be regular."""
@@ -52,12 +58,13 @@ class TestParseWordLine:
         assert word["translation"] == "to see"
 
     def test_irregular_verb_multi_word_translation(self):
+        # Input preserved exactly \u2014 no auto-conversion.
         word, err = _parse_word_line("vi laufen ist gelaufen laufe laeufst laeuft to run very fast")
         assert err is None
         assert word["irregular_forms"] == {
             "ich": "laufe",
-            "du": "l\u00e4ufst",
-            "er": "l\u00e4uft",
+            "du": "laeufst",
+            "er": "laeuft",
         }
         assert word["translation"] == "to run very fast"
 
@@ -89,10 +96,11 @@ class TestParseWordLine:
         assert word["part_of_speech"] == "v"
         assert word["german"] == "fahren"
         assert word["partizip_ii"] == "ist gefahren"
+        # Input preserved verbatim — no auto-conversion.
         assert word["irregular_forms"] == {
             "ich": "fahre",
-            "du": "fährst",
-            "er": "fährt",
+            "du": "faehrst",
+            "er": "faehrt",
         }
         assert word["translation"] == "to drive a car"
 
@@ -168,10 +176,46 @@ class TestParseWordLine:
         assert word is None
         assert "Unknown" in err
 
-    def test_umlaut_conversion(self):
+    def test_umlaut_input_preserved_ascii(self):
+        """Users may write ae/oe/ue/ss for \u00e4/\u00f6/\u00fc/\u00df. Whatever they wrote is what
+        gets stored \u2014 no auto-conversion (auto-conversion frequently misspelled words)."""
         word, err = _parse_word_line("adj schoen beautiful")
         assert err is None
+        assert word["german"] == "schoen"
+
+    def test_umlaut_input_preserved_unicode(self):
+        """Users can also type real umlauts directly \u2014 those are preserved too."""
+        word, err = _parse_word_line("adj sch\u00f6n beautiful")
+        assert err is None
         assert word["german"] == "sch\u00f6n"
+
+    def test_eszett_input_preserved(self):
+        """\u00df stays \u00df; ss stays ss \u2014 whichever the user wrote."""
+        unicode_word, err = _parse_word_line("n die Stra\u00dfe Stra\u00dfen street")
+        assert err is None
+        assert unicode_word["german"] == "Stra\u00dfe"
+        assert unicode_word["plural"] == "Stra\u00dfen"
+
+        ascii_word, err = _parse_word_line("n die Strasse Strassen street")
+        assert err is None
+        assert ascii_word["german"] == "Strasse"
+        assert ascii_word["plural"] == "Strassen"
+
+    def test_noun_with_umlaut_preserved(self):
+        word, err = _parse_word_line("n das M\u00e4dchen M\u00e4dchen girl")
+        assert err is None
+        assert word["german"] == "M\u00e4dchen"
+        assert word["plural"] == "M\u00e4dchen"
+
+    def test_verb_partizip_with_umlaut_preserved(self):
+        word, err = _parse_word_line("v fahren gefahren to drive")
+        assert err is None
+        assert word["partizip_ii"] == "gefahren"
+        # And the unicode variant on partizip
+        word2, err2 = _parse_word_line("v h\u00f6ren geh\u00f6rt to hear")
+        assert err2 is None
+        assert word2["german"] == "h\u00f6ren"
+        assert word2["partizip_ii"] == "geh\u00f6rt"
 
     def test_verb_single_partizip(self):
         """Verb with single-word partizip (no ist/hat prefix)."""
@@ -436,7 +480,9 @@ class TestConstants:
         assert "vi infinitive" in ADD_FORMAT_MESSAGE
         assert "adj word translation" in ADD_FORMAT_MESSAGE
         assert "adv word translation" in ADD_FORMAT_MESSAGE
-        assert "/cancel" in ADD_FORMAT_MESSAGE
+        # Preview now uses inline buttons (Confirm + Cancel) instead of /confirm and /cancel
+        assert "Confirm" in ADD_FORMAT_MESSAGE
+        assert "Cancel" in ADD_FORMAT_MESSAGE
 
     def test_start_message_has_all_commands(self):
         from bot.handlers import START_MESSAGE
@@ -445,6 +491,16 @@ class TestConstants:
             assert cmd in START_MESSAGE
         # Should also explain rating buttons (via QUIZ_START_MESSAGE)
         assert "Misspell" in START_MESSAGE
+
+    def test_commands_help_escapes_angle_brackets(self):
+        """`<id|all>` etc. must be escaped — Telegram parses parse_mode=HTML strictly
+        and rejects unknown tags, which once broke /start and the /help Commands button."""
+        from bot.handlers import COMMANDS_HELP, START_MESSAGE
+
+        # The placeholder for /remindoff must be the escaped form.
+        assert "&lt;id|all&gt;" in COMMANDS_HELP
+        assert "<id|all>" not in COMMANDS_HELP
+        assert "<id|all>" not in START_MESSAGE
 
 
 # --- Async handler tests using mocked Update/Context ---
@@ -560,16 +616,28 @@ class TestDeleteCommand:
         assert "Multiple matches" in text
         assert len(fake_context.user_data["pending_delete"]) == 2
 
-    async def test_umlaut_conversion_on_delete(self, fake_update, fake_context, db):
-        from bot.database import add_word
+    async def test_delete_requires_exact_match(self, fake_update, fake_context, db):
+        """/delete uses the literal text the user typed — no umlaut conversion.
+        Matches storage policy: words are stored verbatim, so deletion must
+        match verbatim too."""
+        from bot.database import add_word, get_words
         from bot.handlers import delete_command
 
         await add_word(db, 12345, "adj", "schön", "beautiful")
+
+        # ASCII form does NOT match Unicode-stored word
         upd = fake_update()
-        fake_context.args = ["schoen"]  # ASCII form
+        fake_context.args = ["schoen"]
         await delete_command(upd, fake_context)
-        text = upd.message.reply_text.call_args.args[0]
-        assert "Deleted" in text
+        assert "No word" in upd.message.reply_text.call_args.args[0]
+        assert len(await get_words(db, 12345)) == 1
+
+        # Exact form succeeds
+        upd2 = fake_update()
+        fake_context.args = ["schön"]
+        await delete_command(upd2, fake_context)
+        assert "Deleted" in upd2.message.reply_text.call_args.args[0]
+        assert len(await get_words(db, 12345)) == 0
 
     async def test_clears_pending_on_new_call(self, fake_update, fake_context, db):
         from bot.database import add_word
@@ -738,25 +806,33 @@ class TestAddConversation:
         assert fake_context.user_data["add_tag"] == "animals"
 
     async def test_add_words_all_valid_shows_preview(self, fake_update, fake_context, db):
-        """All-valid input goes to preview (ADD_CONFIRM), no DB writes yet."""
+        """All-valid input goes to preview (ADD_CONFIRM) with Confirm/Cancel buttons,
+        no DB writes yet."""
         from bot.database import get_words
-        from bot.handlers import ADD_CONFIRM, add_words_received
+        from bot.handlers import ADD_CONFIRM, CB_ADD, add_words_received
 
         fake_context.user_data["add_tag"] = "animals"
         upd = fake_update(text="n die Katze Katzen cat\nadj schnell fast")
         result = await add_words_received(upd, fake_context)
         assert result == ADD_CONFIRM
-        text = upd.message.reply_text.call_args.args[0]
+        call_args = upd.message.reply_text.call_args
+        text = call_args.args[0]
         assert "Preview" in text
-        assert "/confirm" in text
+        assert "Confirm" in text
+        # The reply must include the Confirm/Cancel inline keyboard
+        markup = call_args.kwargs.get("reply_markup")
+        assert markup is not None
+        callbacks = {b.callback_data for row in markup.inline_keyboard for b in row}
+        assert f"{CB_ADD}confirm" in callbacks
+        assert f"{CB_ADD}cancel" in callbacks
         # Nothing saved yet
         assert len(await get_words(db, 12345)) == 0
         assert len(fake_context.user_data["parsed_words"]) == 2
 
-    async def test_add_confirm_saves(self, fake_update, fake_context, db):
-        """/confirm after preview persists the parsed words."""
+    async def test_add_callback_confirm_saves(self, fake_update, fake_context, db):
+        """Tapping Confirm in the preview persists the parsed words."""
         from bot.database import get_words
-        from bot.handlers import ConversationHandler, add_confirm
+        from bot.handlers import ConversationHandler, add_callback
 
         fake_context.user_data["add_tag"] = "animals"
         fake_context.user_data["parsed_words"] = [
@@ -770,20 +846,22 @@ class TestAddConversation:
                 "irregular_forms": None,
             }
         ]
-        upd = fake_update()
-        result = await add_confirm(upd, fake_context)
+        upd = fake_update(callback_data="add:confirm")
+        result = await add_callback(upd, fake_context)
         assert result == ConversationHandler.END
         words = await get_words(db, 12345)
         assert len(words) == 1
         assert words[0]["tags"] == "animals"
+        # Buttons must be cleared so the user can't double-confirm
+        upd.callback_query.edit_message_reply_markup.assert_awaited()
 
-    async def test_add_confirm_with_no_pending(self, fake_update, fake_context, db):
-        from bot.handlers import ConversationHandler, add_confirm
+    async def test_add_callback_confirm_with_no_pending(self, fake_update, fake_context, db):
+        from bot.handlers import ConversationHandler, add_callback
 
-        upd = fake_update()
-        result = await add_confirm(upd, fake_context)
+        upd = fake_update(callback_data="add:confirm")
+        result = await add_callback(upd, fake_context)
         assert result == ConversationHandler.END
-        text = upd.message.reply_text.call_args.args[0]
+        text = upd.callback_query.message.reply_text.call_args.args[0]
         assert "Nothing to save" in text
 
     async def test_add_words_replaces_preview(self, fake_update, fake_context, db):
@@ -840,7 +918,7 @@ class TestAddConversation:
     async def test_add_existing_word_with_new_tag_merges(self, fake_update, fake_context, db):
         """Re-adding the same word with a new tag merges, not duplicates."""
         from bot.database import add_word, get_words
-        from bot.handlers import ConversationHandler, add_confirm
+        from bot.handlers import ConversationHandler, add_callback
 
         # Existing word with tag "animals"
         await add_word(db, 12345, "n", "Katze", "cat", article="die", tags="animals")
@@ -857,8 +935,8 @@ class TestAddConversation:
                 "irregular_forms": None,
             }
         ]
-        upd = fake_update()
-        result = await add_confirm(upd, fake_context)
+        upd = fake_update(callback_data="add:confirm")
+        result = await add_callback(upd, fake_context)
         assert result == ConversationHandler.END
 
         # No duplicate row created; tags merged
@@ -866,12 +944,12 @@ class TestAddConversation:
         assert len(words) == 1
         assert words[0]["tags"] == "animals,A1"
 
-        text = upd.message.reply_text.call_args.args[0]
+        text = upd.callback_query.message.reply_text.call_args.args[0]
         assert "Tag" in text and "#A1" in text
 
     async def test_add_existing_word_same_tag_no_change(self, fake_update, fake_context, db):
         from bot.database import add_word, get_words
-        from bot.handlers import add_confirm
+        from bot.handlers import add_callback
 
         await add_word(db, 12345, "adj", "schnell", "fast", tags="speed")
 
@@ -887,20 +965,20 @@ class TestAddConversation:
                 "irregular_forms": None,
             }
         ]
-        upd = fake_update()
-        await add_confirm(upd, fake_context)
+        upd = fake_update(callback_data="add:confirm")
+        await add_callback(upd, fake_context)
 
         words = await get_words(db, 12345)
         assert len(words) == 1
         assert words[0]["tags"] == "speed"
 
-        text = upd.message.reply_text.call_args.args[0]
+        text = upd.callback_query.message.reply_text.call_args.args[0]
         assert "Already existed" in text
 
     async def test_homograph_different_pos_creates_new_row(self, fake_update, fake_context, db):
         """'laut' as adj (loud) and as noun (sound) are different words."""
         from bot.database import add_word, get_words
-        from bot.handlers import add_confirm
+        from bot.handlers import add_callback
 
         await add_word(db, 12345, "adj", "laut", "loud")
 
@@ -916,20 +994,24 @@ class TestAddConversation:
                 "irregular_forms": None,
             }
         ]
-        upd = fake_update()
-        await add_confirm(upd, fake_context)
+        upd = fake_update(callback_data="add:confirm")
+        await add_callback(upd, fake_context)
 
         words = await get_words(db, 12345)
         assert len(words) == 2  # both adj and noun rows
 
-    async def test_add_cancel(self, fake_update, fake_context):
-        from bot.handlers import ConversationHandler, add_cancel
+    async def test_add_callback_cancel_clears_state(self, fake_update, fake_context):
+        from bot.handlers import ConversationHandler, add_callback
 
         fake_context.user_data["parsed_words"] = [{"x": 1}]
-        upd = fake_update()
-        result = await add_cancel(upd, fake_context)
+        fake_context.user_data["add_tag"] = "tag"
+        upd = fake_update(callback_data="add:cancel")
+        result = await add_callback(upd, fake_context)
         assert result == ConversationHandler.END
         assert "parsed_words" not in fake_context.user_data
+        assert "add_tag" not in fake_context.user_data
+        text = upd.callback_query.message.reply_text.call_args.args[0]
+        assert "cancelled" in text.lower()
 
 
 # --- /quiz conversation flow ---
@@ -1004,14 +1086,69 @@ class TestQuizConversation:
         assert state is not None
         assert state["correct_count"] == 1
 
-    async def test_quiz_cancel(self, fake_update, fake_context):
+    async def test_quiz_cancel_no_session(self, fake_update, fake_context):
         from bot.handlers import ConversationHandler, quiz_cancel
 
-        fake_context.user_data["quiz_session"] = "dummy"
+        upd = fake_update()
+        result = await quiz_cancel(upd, fake_context)
+        assert result == ConversationHandler.END
+        text = upd.message.reply_text.call_args.args[0]
+        assert text == "Quiz cancelled."
+
+    async def test_quiz_cancel_clears_unanswered_session(self, fake_update, fake_context, db):
+        """Cancelling with zero rated answers shouldn't write SM-2 state."""
+        from bot.database import add_word, get_sm2_state
+        from bot.handlers import ConversationHandler, quiz_cancel
+        from bot.quiz import QuizSession
+
+        word_id = await add_word(db, 12345, "adj", "schnell", "fast")
+        fake_context.user_data["quiz_session"] = QuizSession(user_id=12345, questions=[])
         upd = fake_update()
         result = await quiz_cancel(upd, fake_context)
         assert result == ConversationHandler.END
         assert "quiz_session" not in fake_context.user_data
+        # Nothing got persisted
+        assert await get_sm2_state(db, 12345, word_id, "translate") is None
+
+    async def test_quiz_cancel_persists_partial_progress(self, fake_update, fake_context, db):
+        """Cancelling mid-quiz must write SM-2 + history for already-rated answers."""
+        from bot.database import add_word, get_sm2_state
+        from bot.handlers import ConversationHandler, quiz_cancel
+        from bot.quiz import QuizSession, _generate_translate
+
+        word_id = await add_word(db, 12345, "adj", "schnell", "fast")
+        word = {
+            "id": word_id,
+            "user_id": 12345,
+            "part_of_speech": "adj",
+            "german": "schnell",
+            "translation": "fast",
+            "article": None,
+            "plural": None,
+            "partizip_ii": None,
+            "irregular_forms": None,
+        }
+        question = _generate_translate(word)
+        # One question, already answered + rated as Good (4)
+        session = QuizSession(
+            user_id=12345,
+            questions=[question],
+            current_index=1,
+            results=[(4, True)],
+        )
+        fake_context.user_data["quiz_session"] = session
+
+        upd = fake_update()
+        result = await quiz_cancel(upd, fake_context)
+        assert result == ConversationHandler.END
+        # SM-2 was persisted for the rated answer
+        state = await get_sm2_state(db, 12345, word_id, "translate")
+        assert state is not None
+        assert state["correct_count"] == 1
+        # User-facing message mentions partial progress + summary
+        text = upd.message.reply_text.call_args.args[0]
+        assert "Partial progress saved" in text
+        assert "1/1 correct" in text
 
     async def test_quiz_start_clears_stale_state(self, fake_update, fake_context, db):
         """Re-entering /quiz should clear any stale session state from a previous run."""

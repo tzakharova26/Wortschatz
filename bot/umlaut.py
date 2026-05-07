@@ -1,13 +1,3 @@
-_REPLACEMENTS = [
-    ("ae", "\u00e4"),
-    ("oe", "\u00f6"),
-    ("ue", "\u00fc"),
-    ("Ae", "\u00c4"),
-    ("Oe", "\u00d6"),
-    ("Ue", "\u00dc"),
-    ("ss", "\u00df"),
-]
-
 # Reverse mapping: unicode -> ascii digraph (lowercase only, for comparison)
 _EXPAND_MAP = {
     "\u00e4": "ae",
@@ -20,17 +10,6 @@ _EXPAND_MAP = {
 }
 
 _SPECIAL_CHARS = set("\u00e4\u00f6\u00fc\u00c4\u00d6\u00dc\u00df")
-
-
-def convert_umlauts(text: str) -> str:
-    """Convert ASCII umlaut representations to proper Unicode characters.
-
-    ae -> ä, oe -> ö, ue -> ü, ss -> ß (eszett)
-    """
-    result = text
-    for ascii_form, unicode_form in _REPLACEMENTS:
-        result = result.replace(ascii_form, unicode_form)
-    return result
 
 
 def _expand_special_chars(text: str) -> str:

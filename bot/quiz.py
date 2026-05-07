@@ -172,12 +172,14 @@ def _generate_multiple_choice(word: dict, all_words: list[dict]) -> QuizQuestion
     pos = word["part_of_speech"]
     word_id = word["id"]
 
-    # Collect wrong options: prefer same POS, then any POS
+    # Collect wrong options: prefer same POS, then any POS.
+    # Shuffle each pool independently and concatenate (NOT shuffle the merged list)
+    # so same-POS distractors are exhausted before other-POS words appear.
     same_pos = [w for w in all_words if w["part_of_speech"] == pos and w["id"] != word_id]
     other = [w for w in all_words if w["part_of_speech"] != pos and w["id"] != word_id]
-
+    random.shuffle(same_pos)
+    random.shuffle(other)
     wrong_pool = same_pos + other
-    random.shuffle(wrong_pool)
     wrong_translations = []
     seen = {word["translation"].lower()}
     for w in wrong_pool:

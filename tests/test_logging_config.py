@@ -60,6 +60,32 @@ class TestSetupLogging:
                         root.removeFilter(f)
 
 
+class TestNoisyLoggersSilenced:
+    def test_httpx_set_to_warning(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_file = os.path.join(tmpdir, "bot.log")
+            with (
+                patch("bot.logging_config.LOG_DIR", tmpdir),
+                patch("bot.logging_config.LOG_FILE", log_file),
+            ):
+                root = logging.getLogger()
+                original_handlers = root.handlers[:]
+
+                setup_logging()
+
+                # The bot token leaks via httpx INFO logs (Telegram path-based auth);
+                # setup_logging must raise httpx-family loggers to WARNING.
+                for noisy in ("httpx", "httpcore", "telegram.request"):
+                    assert (
+                        logging.getLogger(noisy).level == logging.WARNING
+                    ), f"{noisy} should be at WARNING to avoid leaking the bot token"
+
+                for h in root.handlers[:]:
+                    if h not in original_handlers:
+                        root.removeHandler(h)
+                        h.close()
+
+
 class TestLogHelpers:
     def test_log_user_action(self, caplog):
         logger = get_logger("test.action")
