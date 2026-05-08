@@ -228,38 +228,73 @@ def _build_verb_form_steps(word: dict) -> list[LearnStep]:
     ]
 
 
+def _interleave_steps(per_word: list[list[LearnStep]]) -> list[LearnStep]:
+    """Round-robin across words with randomness: each round emits one step from
+    every still-non-empty word in a freshly shuffled order. Per-word step order
+    (SHOW → MC → TYPED → extras) is preserved because we only pop the head of
+    each word's queue.
+
+    With ≥2 words, no two consecutive steps will be from the same word — the
+    intra-round shuffle handles within-round variance, and we swap the first
+    pick of each new round if it would collide with the previous round's last
+    pick. (With a single word, back-to-back is unavoidable, but then there's no
+    other word to interleave with.)
+    """
+    queues = [list(q) for q in per_word if q]
+    out: list[LearnStep] = []
+    last_word_id: int | None = None
+    while any(queues):
+        active = [q for q in queues if q]
+        order = list(range(len(active)))
+        random.shuffle(order)  # noqa: S311
+        if last_word_id is not None and len(order) > 1:
+            if active[order[0]][0].word["id"] == last_word_id:
+                order[0], order[1] = order[1], order[0]
+        for i in order:
+            step = active[i].pop(0)
+            out.append(step)
+            last_word_id = step.word["id"]
+        queues = [q for q in queues if q]
+    return out
+
+
 def build_session(user_id: int, words: list[dict], all_words: list[dict]) -> LearnSession:
-    """Build a learning session: per-word massed drill (show → MC → typed → extras)."""
-    steps: list[LearnStep] = []
+    """Build a learning session: per-word massed drill (show → MC → typed → extras),
+    with steps interleaved across words so the same word doesn't repeat back-to-back
+    when more than one word is being learned in the session."""
+    per_word_steps: list[list[LearnStep]] = []
     required: dict[int, set[str]] = {}
 
     for w in words:
         word_id = w["id"]
         word_required: set[str] = set()
+        word_steps: list[LearnStep] = []
 
-        steps.append(_build_show_step(w))
+        word_steps.append(_build_show_step(w))
         word_required.add(SHOW)
 
-        steps.append(_build_mc_step(w, all_words))
+        word_steps.append(_build_mc_step(w, all_words))
         word_required.add(MC)
 
-        steps.append(_build_typed_step(w))
+        word_steps.append(_build_typed_step(w))
         word_required.add(TYPED)
 
         if w["part_of_speech"] == "n":
             if w.get("article"):
-                steps.append(_build_article_step(w))
+                word_steps.append(_build_article_step(w))
                 word_required.add(ARTICLE)
             if w.get("plural") and w["plural"].strip():
-                steps.append(_build_plural_step(w))
+                word_steps.append(_build_plural_step(w))
                 word_required.add(PLURAL)
 
-        verb_form_steps = _build_verb_form_steps(w)
-        for vs in verb_form_steps:
-            steps.append(vs)
+        for vs in _build_verb_form_steps(w):
+            word_steps.append(vs)
             word_required.add(f"{VERB_FORM}:{vs.verb_form_key}")
 
+        per_word_steps.append(word_steps)
         required[word_id] = word_required
+
+    steps = _interleave_steps(per_word_steps)
 
     log_user_action(
         logger,

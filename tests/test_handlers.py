@@ -324,6 +324,32 @@ class TestFormatWordTables:
         text = _format_word_tables([])
         assert text == ""
 
+    def test_show_ids_false_drops_id_prefix(self):
+        words = [
+            {
+                "id": 1,
+                "part_of_speech": "n",
+                "german": "Katze",
+                "article": "die",
+                "plural": "Katzen",
+                "translation": "cat",
+                "irregular_forms": None,
+            },
+            {
+                "id": 2,
+                "part_of_speech": "adj",
+                "german": "schnell",
+                "translation": "fast",
+                "irregular_forms": None,
+            },
+        ]
+        text = _format_word_tables(words, show_ids=False)
+        assert "[1]" not in text
+        assert "[2]" not in text
+        # Word data still present
+        assert "Katze" in text
+        assert "schnell" in text
+
 
 class TestRatingKeyboard:
     def test_correct_buttons(self):
@@ -696,7 +722,7 @@ class TestStartHelp:
         button_texts = [b.text for b in markup.inline_keyboard[0]]
         assert "Commands" in button_texts
         assert "How to add words" in button_texts
-        assert "How quizzes work" in button_texts
+        assert "Learn & quiz" in button_texts
 
 
 class TestHelpCallback:
@@ -718,12 +744,15 @@ class TestHelpCallback:
         text = upd.callback_query.edit_message_text.call_args.args[0]
         assert text == ADD_FORMAT_MESSAGE
 
-    async def test_quiz_topic(self, fake_update, fake_context):
+    async def test_practice_topic(self, fake_update, fake_context):
         from bot.handlers import help_callback
 
-        upd = fake_update(callback_data="help:quiz")
+        upd = fake_update(callback_data="help:practice")
         await help_callback(upd, fake_context)
         text = upd.callback_query.edit_message_text.call_args.args[0]
+        # Combined help should mention both flows and the SM-2 rating buttons
+        assert "/learn" in text
+        assert "/quiz" in text
         assert "Translate" in text
         assert "Multiple choice" in text
         assert "Misspell" in text
@@ -1041,6 +1070,9 @@ class TestQuizConversation:
         assert result == ConversationHandler.END
         text = upd.message.reply_text.call_args.args[0]
         assert "No words to quiz" in text
+        # Empty vocabulary → suggest /add (not /learn).
+        assert "/add" in text
+        assert "/learn" not in text
 
     async def test_quiz_start_with_words(self, fake_update, fake_context, db):
         from bot.database import add_word
@@ -1065,6 +1097,9 @@ class TestQuizConversation:
         assert result == ConversationHandler.END
         text = upd.message.reply_text.call_args.args[0]
         assert "No words to quiz" in text
+        # Has un-graduated words — should point at /learn, not /add.
+        assert "/learn" in text
+        assert "/add" not in text
 
     async def test_text_answer_no_session(self, fake_update, fake_context):
         from bot.handlers import ConversationHandler, quiz_text_answer
@@ -1818,6 +1853,28 @@ class TestLearnConversation:
         session = fake_context.user_data["learn_session"]
         # adj → 3 steps: show, mc, typed
         assert len(session.steps) == 3
+
+    async def test_learn_size_below_minimum_is_bumped(self, fake_update, fake_context, db):
+        """`/learn 2` should be bumped to LEARN_MIN_SIZE before the session is built."""
+        from bot.config import LEARN_MIN_SIZE
+        from bot.database import add_word
+        from bot.handlers import learn_start
+
+        # Seed enough words so the bump is observable
+        for i in range(LEARN_MIN_SIZE + 2):
+            await add_word(db, 12345, "adj", f"word{i}", f"trans{i}")
+
+        upd = fake_update()
+        fake_context.args = ["2"]
+        await learn_start(upd, fake_context)
+
+        # The "Bumped" notice should be the first reply
+        first_reply = upd.message.reply_text.call_args_list[0].args[0]
+        assert "Bumped" in first_reply
+        # Session built with at least LEARN_MIN_SIZE words
+        session = fake_context.user_data["learn_session"]
+        word_ids = {step.word["id"] for step in session.steps}
+        assert len(word_ids) == LEARN_MIN_SIZE
 
     async def test_learn_full_pass_graduates_word_into_quiz_pool(
         self, fake_update, fake_context, db

@@ -65,8 +65,13 @@ async def _drop_buttons(query, user_id: int) -> None:
         logger.debug("Could not strip keyboard: %s", e, extra={"user_id": user_id})
 
 
-def _format_word_tables(words: list[dict]) -> str:
-    """Format words grouped by POS as readable tables. HTML-escaped."""
+def _format_word_tables(words: list[dict], show_ids: bool = True) -> str:
+    """Format words grouped by POS as readable tables. HTML-escaped.
+
+    ``show_ids=True`` (default) prints the ``[id]`` prefix used by /list (and
+    referenced by /delete to disambiguate matches). /add post-save passes False
+    because the user just typed the words and doesn't need internal IDs surfaced.
+    """
     groups: dict[str, list[dict]] = {}
     for w in words:
         pos = w["part_of_speech"]
@@ -90,7 +95,7 @@ def _format_word_tables(words: list[dict]) -> str:
         lines.append(f"\n<b>{pos_labels.get(pos, pos)}:</b>")
         for w in groups[pos]:
             wid = w.get("id")
-            id_prefix = f"[{wid}] " if wid is not None else ""
+            id_prefix = f"[{wid}] " if (show_ids and wid is not None) else ""
             german = esc(w["german"])
             translation = esc(w["translation"])
             if pos == "n":

@@ -23,7 +23,7 @@ from bot.config import (
     QUIZ_SESSION_SIZE,
     QUIZ_START_MESSAGE,
 )
-from bot.database import get_due_words, get_words_by_pos
+from bot.database import get_due_words, get_needs_learning_words, get_words_by_pos
 from bot.logging_config import get_logger, log_user_action, log_user_warning
 from bot.quiz import apply_results, build_quiz_session, check_answer, format_summary
 
@@ -113,10 +113,16 @@ async def quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     # Fetch up to `size` most-due words; if user has fewer, build_quiz_session cycles.
     due_words = await get_due_words(conn, user_id, limit=size, tag=tag)
     if not due_words:
+        # Distinguish "user has no words yet" from "user has words but none are
+        # graduated yet" — the second case should point at /learn, not /add.
+        unlearned = await get_needs_learning_words(conn, user_id, limit=1, tag=tag)
         msg = "No words to quiz on."
         if tag:
             msg += f" (tag: #{tag})"
-        msg += " Add some words first with /add."
+        if unlearned:
+            msg += " You have words that haven't graduated yet — use /learn first."
+        else:
+            msg += " Add some words first with /add."
         await update.message.reply_text(msg)
         return ConversationHandler.END
 

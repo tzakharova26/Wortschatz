@@ -4,6 +4,9 @@ QUIZ_TEMPERATURE = 0.3
 LIST_MAX_WORDS = 40
 
 # /learn batches are heavier per word (4-5 steps), so cap is lower than /quiz.
+# Floor exists so a single session has enough words to interleave meaningfully —
+# below ~5 words the round-robin shuffle degenerates into a near-fixed sequence.
+LEARN_MIN_SIZE = 5
 LEARN_MAX_SIZE = 10
 
 LEARN_START_MESSAGE = (

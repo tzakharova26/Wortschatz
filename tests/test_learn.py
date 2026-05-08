@@ -179,6 +179,25 @@ class TestBuildSession:
         types = [step.step_type for step in s.steps]
         assert types == [SHOW, MC, TYPED]
 
+    def test_multi_word_steps_interleaved(self):
+        """With ≥2 words, no two consecutive steps should be from the same word."""
+        words = [
+            _word(1, pos="adj", german="schnell", translation="fast"),
+            _word(2, pos="adj", german="langsam", translation="slow"),
+            _word(3, pos="adj", german="müde", translation="tired"),
+        ]
+        session = build_session(USER_ID, words, words)
+        # Each adj contributes 3 steps × 3 words = 9 total
+        assert len(session.steps) == 9
+        # No same word twice in a row
+        ids = [step.word["id"] for step in session.steps]
+        for prev, curr in zip(ids, ids[1:], strict=False):
+            assert prev != curr, f"consecutive steps on same word: {ids}"
+        # Per-word pedagogical order preserved (SHOW → MC → TYPED for each word)
+        for word_id in (1, 2, 3):
+            order = [step.step_type for step in session.steps if step.word["id"] == word_id]
+            assert order == [SHOW, MC, TYPED]
+
 
 # --- Step recording, retry queue, graduation ---
 

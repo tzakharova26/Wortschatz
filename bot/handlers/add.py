@@ -239,12 +239,12 @@ async def _save_words(update, context, parsed, conn, user_id, tag) -> int:
 
     parts: list[str] = []
     if added:
-        parts.append(f"Added {len(added)} new word(s):{_format_word_tables(added)}")
+        parts.append(f"Added {len(added)} new word(s):{_format_word_tables(added, show_ids=False)}")
     if merged:
         safe_tag = html.escape(tag)
         parts.append(
             f"Tag <b>#{safe_tag}</b> added to {len(merged)} existing word(s):"
-            + _format_word_tables(merged)
+            + _format_word_tables(merged, show_ids=False)
         )
     if unchanged:
         names = ", ".join(html.escape(w["german"]) for w in unchanged)

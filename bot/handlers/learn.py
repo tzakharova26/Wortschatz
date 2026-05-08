@@ -22,7 +22,7 @@ from telegram.ext import (
 )
 
 from bot import learn as learn_core
-from bot.config import LEARN_MAX_SIZE, LEARN_START_MESSAGE
+from bot.config import LEARN_MAX_SIZE, LEARN_MIN_SIZE, LEARN_START_MESSAGE
 from bot.database import get_needs_learning_words, get_words_by_pos
 from bot.logging_config import get_logger, log_user_action, log_user_error, log_user_warning
 
@@ -119,18 +119,21 @@ async def learn_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await update.message.reply_text("Learn size must be a positive number.")
         return ConversationHandler.END
 
-    capped = False
+    notice: str | None = None
     if requested_size is not None and requested_size > LEARN_MAX_SIZE:
+        notice = f"(Capped to {LEARN_MAX_SIZE} words.)"
         requested_size = LEARN_MAX_SIZE
-        capped = True
+    elif requested_size is not None and requested_size < LEARN_MIN_SIZE:
+        notice = f"(Bumped to minimum of {LEARN_MIN_SIZE} words.)"
+        requested_size = LEARN_MIN_SIZE
     size = requested_size if requested_size is not None else LEARN_MAX_SIZE
 
     log_user_action(logger, user_id, f"/learn size={size} tag={_safe_log(tag) if tag else 'all'}")
 
     conn = _get_conn(context)
     words = await get_needs_learning_words(conn, user_id, limit=size, tag=tag)
-    if capped:
-        await update.message.reply_text(f"(Capped to {LEARN_MAX_SIZE} words.)")
+    if notice:
+        await update.message.reply_text(notice)
     return await _start_learn_session(update, context, user_id, words, update.message)
 
 

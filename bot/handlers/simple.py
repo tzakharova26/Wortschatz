@@ -60,7 +60,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         [
             InlineKeyboardButton("Commands", callback_data=f"{CB_HELP}commands"),
             InlineKeyboardButton("How to add words", callback_data=f"{CB_HELP}add"),
-            InlineKeyboardButton("How quizzes work", callback_data=f"{CB_HELP}quiz"),
+            InlineKeyboardButton("Learn & quiz", callback_data=f"{CB_HELP}practice"),
         ]
     ]
     await update.message.reply_text(
@@ -82,21 +82,33 @@ async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         text = COMMANDS_HELP
     elif topic == "add":
         text = ADD_FORMAT_MESSAGE
-    elif topic == "quiz":
+    elif topic == "practice":
         text = (
-            "<b>How quizzes work:</b>\n\n"
-            "Use <code>/quiz [N] [tag]</code> — both args optional.\n"
-            "  <code>/quiz</code> — 7 mixed questions on most-due words\n"
-            "  <code>/quiz 20</code> — 20 questions\n"
-            "  <code>/quiz animals</code> — filter by tag\n"
-            "  <code>/quiz 10 animals</code> — combine\n\n"
-            "If your vocabulary is smaller than the requested size, words repeat "
-            "with new quiz types each round.\n\n"
-            "Question types (mixed within a session):\n"
-            "- Translate: type the German word\n"
-            "- Multiple choice: pick the translation\n"
-            "- Article: pick der/die/das (nouns only)\n"
-            "- Verb forms: type the asked form (irregular verbs only)\n\n" + QUIZ_START_MESSAGE
+            "<b>Practice flow: /learn → /quiz</b>\n\n"
+            "Brand-new words go through <b>/learn</b> first (a guided drill), then "
+            "graduate into <b>/quiz</b> for spaced repetition.\n\n"
+            "<b>/learn [N] [tag]</b> — acquisition\n"
+            "Use this for words you've just added. Each word steps through:\n"
+            "  1. See the card  2. Multiple choice  3. Type it\n"
+            "  + article and plural (nouns) or two verb forms (irregular verbs)\n"
+            "Steps from different words are interleaved so you don't get stuck on "
+            "one word in a row. Wrong steps are retried at session end. A word "
+            "graduates only after every step is correct.\n"
+            "  <code>/learn</code> — up to 10 not-yet-learned words (min 5)\n"
+            "  <code>/learn 7</code> — explicit size\n"
+            "  <code>/learn animals</code> — filter by tag\n\n"
+            "<b>/quiz [N] [tag]</b> — revision\n"
+            "Use this once you have graduated words. Mixed quiz types pulled from "
+            "due-for-review words:\n"
+            "  - Translate: type the German word\n"
+            "  - Multiple choice: pick the translation\n"
+            "  - Article: pick der/die/das (nouns)\n"
+            "  - Plural: type the plural (nouns)\n"
+            "  - Verb forms: type the asked form (irregular verbs)\n"
+            "If your due-vocabulary is smaller than the requested size, words "
+            "repeat with new quiz types each round.\n"
+            "  <code>/quiz</code> — 7 questions on most-due words\n"
+            "  <code>/quiz 20 animals</code> — 20 questions, filtered\n\n" + QUIZ_START_MESSAGE
         )
     else:
         text = "Unknown topic."
