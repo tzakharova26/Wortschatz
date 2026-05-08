@@ -33,12 +33,16 @@ from ._shared import (
     CB_MC,
     CB_RATE,
     LEARN_ANSWERING,
+    PENDING_DELETE_TTL_S,
+    PENDING_LEARN_TTL_S,
     QUIZ_ANSWERING,
     QUIZ_RATING,
     _drop_buttons,
     _format_word_tables,
     _parse_quiz_args,
     _safe_log,
+    pending_pop,
+    pending_set,
 )
 
 # /add
@@ -124,6 +128,8 @@ __all__ = [
     "COMMANDS_HELP",
     "ConversationHandler",
     "LEARN_ANSWERING",
+    "PENDING_DELETE_TTL_S",
+    "PENDING_LEARN_TTL_S",
     "QUIZ_ANSWERING",
     "QUIZ_RATING",
     "START_MESSAGE",
@@ -176,4 +182,6 @@ __all__ = [
     "_rating_keyboard",
     "_safe_log",
     "_save_words",
+    "pending_pop",
+    "pending_set",
 ]

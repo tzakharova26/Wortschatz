@@ -10,6 +10,8 @@ helpers (e.g. _rating_keyboard for /quiz) live in their own submodule.
 from __future__ import annotations
 
 import html
+import time
+from typing import Any
 
 from telegram.ext import ContextTypes
 
@@ -17,6 +19,38 @@ from bot.database import parse_irregular_forms
 from bot.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+# Lifetimes for short-lived intent stashed on ``context.user_data`` (keys like
+# ``pending_delete`` and ``pending_learn_ids``). Without an explicit TTL the
+# entries linger until their own success paths consume them — pivoting to an
+# unrelated command leaves them behind, and a /delete_confirm hours later
+# would silently confirm an old multi-match. ``pending_delete`` is short
+# because the confirm is meant to follow immediately; ``pending_learn_ids``
+# is longer to accommodate users who add words and tap "Start learning" later.
+PENDING_DELETE_TTL_S = 300
+PENDING_LEARN_TTL_S = 3600
+
+
+def pending_set(context: ContextTypes.DEFAULT_TYPE, key: str, value: Any, ttl: int) -> None:
+    """Stash a short-lived value on user_data with an expiry stamp."""
+    context.user_data[key] = {"value": value, "expires_at": time.monotonic() + ttl}
+
+
+def pending_pop(context: ContextTypes.DEFAULT_TYPE, key: str) -> Any:
+    """Pop a TTL-stamped value if still fresh, else return None and discard.
+
+    Tolerates legacy/raw values (a bare list etc.) by returning them as-is —
+    keeps tests that hand-set ``user_data[key] = [...]`` working.
+    """
+    entry = context.user_data.pop(key, None)
+    if entry is None:
+        return None
+    if isinstance(entry, dict) and "expires_at" in entry:
+        if time.monotonic() > entry["expires_at"]:
+            return None
+        return entry["value"]
+    return entry  # raw legacy value
 
 
 # ConversationHandler states. Each conversation has its own state space so

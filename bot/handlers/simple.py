@@ -17,7 +17,15 @@ from bot.database import (
 from bot.logging_config import get_logger, log_user_action, log_user_error
 from bot.stats import get_user_stats
 
-from ._shared import CB_HELP, _format_word_tables, _get_conn, _safe_log
+from ._shared import (
+    CB_HELP,
+    PENDING_DELETE_TTL_S,
+    _format_word_tables,
+    _get_conn,
+    _safe_log,
+    pending_pop,
+    pending_set,
+)
 
 logger = get_logger(__name__)
 
@@ -161,8 +169,8 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     log_user_action(logger, user_id, f"/delete {_safe_log(' '.join(context.args or []))}")
     conn = _get_conn(context)
 
-    # Clear any stale pending_delete from a previous call
-    context.user_data.pop("pending_delete", None)
+    # Clear any stale pending_delete from a previous call (also drops it if expired)
+    pending_pop(context, "pending_delete")
 
     if not context.args:
         await update.message.reply_text("Usage: /delete german_word")
@@ -181,7 +189,7 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             pos = w["part_of_speech"]
             lines.append(f"  [{w['id']}] {pos}: {w['german']} — {w['translation']}")
         lines.append("\nDelete all of them? Use /delete_confirm to confirm.")
-        context.user_data["pending_delete"] = [w["id"] for w in matches]
+        pending_set(context, "pending_delete", [w["id"] for w in matches], ttl=PENDING_DELETE_TTL_S)
         await update.message.reply_text("\n".join(lines))
         return
 
@@ -198,9 +206,11 @@ async def delete_confirm_command(update: Update, context: ContextTypes.DEFAULT_T
     log_user_action(logger, user_id, "/delete_confirm")
     conn = _get_conn(context)
 
-    pending = context.user_data.get("pending_delete")
+    pending = pending_pop(context, "pending_delete")
     if not pending:
-        await update.message.reply_text("Nothing to confirm.")
+        await update.message.reply_text(
+            "Nothing to confirm — your /delete request may have expired. Re-run /delete."
+        )
         return
 
     count = 0
@@ -208,7 +218,6 @@ async def delete_confirm_command(update: Update, context: ContextTypes.DEFAULT_T
         if await delete_word(conn, user_id, word_id):
             count += 1
 
-    context.user_data.pop("pending_delete", None)
     await update.message.reply_text(f"Deleted {count} word(s).")
 
 

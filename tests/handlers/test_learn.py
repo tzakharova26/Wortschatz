@@ -266,6 +266,29 @@ class TestLearnConversation:
         last_reply = upd.message.reply_text.call_args_list[-1].args[0]
         assert "could not be saved" in last_reply
 
+    async def test_expired_pending_learn_ids_refused(
+        self, fake_update, fake_context, db, monkeypatch
+    ):
+        """A pending_learn_ids past its TTL should not launch a stale /learn batch."""
+        from bot.handlers import PENDING_LEARN_TTL_S, pending_set
+        from bot.handlers import _shared as shared_module
+
+        wid = await add_word(db, 12345, "adj", "schnell", "fast")
+        pending_set(fake_context, "pending_learn_ids", [wid], ttl=PENDING_LEARN_TTL_S)
+
+        real_monotonic = shared_module.time.monotonic
+        monkeypatch.setattr(
+            shared_module.time,
+            "monotonic",
+            lambda: real_monotonic() + PENDING_LEARN_TTL_S + 1,
+        )
+
+        upd = fake_update(callback_data="lbatch:go")
+        result = await learn_batch_callback(upd, fake_context)
+        assert result == ConversationHandler.END
+        text = upd.callback_query.message.reply_text.call_args.args[0]
+        assert "no longer available" in text.lower()
+
     async def test_learn_cancel_persists_partial_graduation(self, fake_update, fake_context, db):
         """If a word fully graduated before cancel, its graduation must persist."""
         from bot.database import get_due_words

@@ -1,9 +1,16 @@
 """Tests for bot/handlers/_shared.py — cross-flow helpers (formatter,
-arg-parser, log sanitizer)."""
+arg-parser, log sanitizer, TTL pending state)."""
 
 import json
+import time
 
-from bot.handlers import _format_word_tables, _parse_quiz_args, _safe_log
+from bot.handlers import (
+    _format_word_tables,
+    _parse_quiz_args,
+    _safe_log,
+    pending_pop,
+    pending_set,
+)
 
 
 class TestFormatWordTables:
@@ -222,3 +229,30 @@ class TestSafeLog:
     def test_none(self):
         assert _safe_log(None) == ""
         assert _safe_log("") == ""
+
+
+class TestPendingTTL:
+    def test_set_and_pop_round_trip(self, fake_context):
+        pending_set(fake_context, "k", [1, 2, 3], ttl=60)
+        assert pending_pop(fake_context, "k") == [1, 2, 3]
+        # After pop, key is gone
+        assert pending_pop(fake_context, "k") is None
+
+    def test_pop_missing_returns_none(self, fake_context):
+        assert pending_pop(fake_context, "never_set") is None
+
+    def test_expired_entry_returns_none(self, fake_context, monkeypatch):
+        """A value past its expires_at should pop as None."""
+        pending_set(fake_context, "k", "payload", ttl=10)
+        # Fast-forward monotonic by 11s so the entry is expired.
+        real_monotonic = time.monotonic
+        # Capture set-time to fake "now > expires_at" reliably.
+        from bot.handlers import _shared as shared_module
+
+        monkeypatch.setattr(shared_module.time, "monotonic", lambda: real_monotonic() + 1000)
+        assert pending_pop(fake_context, "k") is None
+
+    def test_legacy_raw_value_tolerated(self, fake_context):
+        """A bare list (not wrapped) is returned as-is — keeps test seeding simple."""
+        fake_context.user_data["raw"] = [99, 100]
+        assert pending_pop(fake_context, "raw") == [99, 100]

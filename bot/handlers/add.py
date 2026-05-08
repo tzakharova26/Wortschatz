@@ -27,10 +27,12 @@ from ._shared import (
     ADD_WORDS,
     CB_ADD,
     CB_LEARN_BATCH,
+    PENDING_LEARN_TTL_S,
     _drop_buttons,
     _format_word_tables,
     _get_conn,
     _safe_log,
+    pending_set,
 )
 from .parsers import _parse_word_line
 
@@ -253,8 +255,9 @@ async def _save_words(update, context, parsed, conn, user_id, tag) -> int:
     markup = None
     if added:
         # Stash the freshly-added IDs so the "Start learning" button can scope to them.
+        # TTL'd so a forgotten button doesn't cling to user_data forever.
         ids = [w["id"] for w in added]
-        context.user_data["pending_learn_ids"] = ids
+        pending_set(context, "pending_learn_ids", ids, ttl=PENDING_LEARN_TTL_S)
         markup = InlineKeyboardMarkup(
             [
                 [

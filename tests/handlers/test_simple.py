@@ -179,6 +179,36 @@ class TestDeleteConfirmCommand:
         assert len(await get_words(db, 12345)) == 0
         assert "pending_delete" not in fake_context.user_data
 
+    async def test_expired_pending_delete_refused(self, fake_update, fake_context, db, monkeypatch):
+        """A pending_delete past its TTL should be refused, not silently confirmed.
+
+        Regression for the lifetime bug — previously if the user typed /delete
+        Bank → got 2 matches → wandered off → ran /delete_confirm an hour later,
+        the stale list was acted on without warning.
+        """
+        from bot.handlers import PENDING_DELETE_TTL_S, pending_set
+
+        wid1 = await add_word(db, 12345, "n", "Bank", "seat", article="die")
+        wid2 = await add_word(db, 12345, "n", "Bank", "financial", article="die")
+        pending_set(fake_context, "pending_delete", [wid1, wid2], ttl=PENDING_DELETE_TTL_S)
+
+        # Fast-forward monotonic clock past the TTL.
+        from bot.handlers import _shared as shared_module
+
+        real_monotonic = shared_module.time.monotonic
+        monkeypatch.setattr(
+            shared_module.time,
+            "monotonic",
+            lambda: real_monotonic() + PENDING_DELETE_TTL_S + 1,
+        )
+
+        upd = fake_update()
+        await delete_confirm_command(upd, fake_context)
+        text = upd.message.reply_text.call_args.args[0]
+        assert "expired" in text.lower()
+        # Words must NOT have been deleted
+        assert len(await get_words(db, 12345)) == 2
+
 
 class TestStartHelp:
     async def test_start_command(self, fake_update, fake_context):

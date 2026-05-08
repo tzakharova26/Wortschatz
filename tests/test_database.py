@@ -489,10 +489,17 @@ class TestStats:
         stats = await get_stats(db, USER_ID, since)
         assert stats["words_learned"] == 0
 
-    async def test_noun_learned_needs_article(self, db):
-        """Noun needs translate + multiple_choice + article all at 4."""
+    async def test_noun_learned_needs_all_types(self, db):
+        """Noun with a plural needs translate + multiple_choice + article + plural all at 4.
+
+        (The previous /stats had a bug: it didn't SELECT ``plural`` from the
+        words table, so ``get_quiz_types_for_word`` never appended ``plural``
+        to the applicable set, and a noun could be flagged "learned" without
+        passing its plural quiz. The aggregate rewrite surfaces this — the
+        applicable set now correctly includes plural when present.)
+        """
         word_id = await add_word(db, USER_ID, "n", "Katze", "cat", article="die", plural="Katzen")
-        await self._mark_learned(db, word_id, ["translate", "multiple_choice", "article"])
+        await self._mark_learned(db, word_id, ["translate", "multiple_choice", "article", "plural"])
 
         since = datetime.now(timezone.utc) - timedelta(days=1)
         stats = await get_stats(db, USER_ID, since)
@@ -506,6 +513,25 @@ class TestStats:
         since = datetime.now(timezone.utc) - timedelta(days=1)
         stats = await get_stats(db, USER_ID, since)
         assert stats["words_learned"] == 0
+
+    async def test_noun_not_learned_missing_plural(self, db):
+        """Noun with article but no plural quiz at 4 is NOT learned (regression for bug
+        where plural quiz type was silently dropped from the applicable set)."""
+        word_id = await add_word(db, USER_ID, "n", "Katze", "cat", article="die", plural="Katzen")
+        await self._mark_learned(db, word_id, ["translate", "multiple_choice", "article"])
+
+        since = datetime.now(timezone.utc) - timedelta(days=1)
+        stats = await get_stats(db, USER_ID, since)
+        assert stats["words_learned"] == 0
+
+    async def test_noun_no_plural_skips_plural_requirement(self, db):
+        """Noun without a plural (e.g. 'Milch') only needs translate + MC + article."""
+        word_id = await add_word(db, USER_ID, "n", "Milch", "milk", article="die", plural="")
+        await self._mark_learned(db, word_id, ["translate", "multiple_choice", "article"])
+
+        since = datetime.now(timezone.utc) - timedelta(days=1)
+        stats = await get_stats(db, USER_ID, since)
+        assert stats["words_learned"] == 1
 
     async def test_irregular_verb_learned(self, db):
         """Irregular verb needs translate + multiple_choice + verb_forms."""

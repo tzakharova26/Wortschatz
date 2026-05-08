@@ -100,12 +100,17 @@ class QuizSession:
 def _word_score(word: dict, now: datetime, temperature: float) -> float:
     """Compute a word's selection score based on days since last review.
 
-    Higher score = more likely to be selected. Never-reviewed words get max priority.
+    Higher score = more likely to be selected. Never-reviewed words (no SM-2
+    row, no key at all) get max priority.
     Formula: (days_since_last_review + 1) ^ (1 / temperature)
     """
     next_review_str = word.get("earliest_review") or word.get("next_review")
-    if not next_review_str or next_review_str == "1970-01-01":
-        days_since = 365  # never reviewed = high priority
+    # No key at all = direct call from a test or a never-reviewed word path.
+    # The ``'1970-01-01'`` SQL COALESCE sentinel that used to live here is dead:
+    # ``get_due_words`` filters those rows via ``_NOT_LEARNING_CLAUSE`` before
+    # they reach this function.
+    if not next_review_str:
+        days_since = 365
     else:
         try:
             next_review = datetime.fromisoformat(next_review_str)

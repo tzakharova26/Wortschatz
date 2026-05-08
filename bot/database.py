@@ -597,41 +597,49 @@ async def get_stats(conn: aiosqlite.Connection, user_id: int, since: datetime) -
     row = await cursor.fetchone()
     words_added = row["cnt"]
 
-    # Words learned IN PERIOD: count words that crossed the learned threshold during [since, now].
-    # A word is learned when all applicable quiz_types have >= 4 correct answers; the moment
-    # of becoming learned is the timestamp of the LAST such qualifying answer (across the
-    # quiz_types). Count those whose "learned at" timestamp falls within the period.
+    # Words learned IN PERIOD: a word "becomes learned" the moment its slowest
+    # applicable quiz_type hits its 4th correct answer. Count words whose
+    # "learned at" timestamp falls within the period.
+    #
+    # One window-function query gets the 4th-correct timestamp for every
+    # (word, quiz_type) pair across all the user's words. The previous
+    # implementation ran an indexed SELECT per (word × quiz_type) — O(N×M)
+    # round-trips that scaled poorly past a few hundred words.
     cursor = await conn.execute(
-        """SELECT w.id, w.part_of_speech, w.irregular_forms
-           FROM words w
-           WHERE w.user_id = ?""",
+        "SELECT id, part_of_speech, article, plural, irregular_forms "
+        "FROM words WHERE user_id = ?",
         (user_id,),
     )
-    candidate_rows = await cursor.fetchall()
+    word_rows = await cursor.fetchall()
+
+    cursor = await conn.execute(
+        """SELECT word_id, quiz_type, answered_at AS fourth_at
+           FROM (
+               SELECT word_id, quiz_type, answered_at,
+                      ROW_NUMBER() OVER (
+                          PARTITION BY word_id, quiz_type
+                          ORDER BY answered_at
+                      ) AS rn
+               FROM quiz_history
+               WHERE user_id = ? AND correct = 1
+           ) t
+           WHERE rn = 4""",
+        (user_id,),
+    )
+    fourth_rows = await cursor.fetchall()
+
+    fourth_by_word: dict[int, dict[str, str]] = {}
+    for r in fourth_rows:
+        fourth_by_word.setdefault(r["word_id"], {})[r["quiz_type"]] = r["fourth_at"]
+
     words_learned = 0
-    for r in candidate_rows:
+    for r in word_rows:
         word_dict = dict(r)
-        applicable = get_quiz_types_for_word(word_dict)
-        # For each applicable quiz_type, find the timestamp of the 4th correct answer.
-        # If any quiz_type doesn't have 4 correct answers, the word isn't learned yet.
-        type_timestamps = []
-        all_done = True
-        for qt in applicable:
-            qt_cursor = await conn.execute(
-                """SELECT answered_at FROM quiz_history
-                   WHERE user_id = ? AND word_id = ? AND quiz_type = ? AND correct = 1
-                   ORDER BY answered_at LIMIT 1 OFFSET 3""",
-                (user_id, word_dict["id"], qt),
-            )
-            qt_row = await qt_cursor.fetchone()
-            if qt_row is None:
-                all_done = False
-                break
-            type_timestamps.append(qt_row[0])
-        if not all_done:
+        applicable = set(get_quiz_types_for_word(word_dict))
+        per_type = fourth_by_word.get(word_dict["id"], {})
+        if not applicable.issubset(per_type):
             continue
-        # Word became learned at the latest of these "4th-correct" timestamps
-        learned_at = max(type_timestamps)
+        learned_at = max(per_type[qt] for qt in applicable)
         if learned_at >= since_str:
             words_learned += 1
 

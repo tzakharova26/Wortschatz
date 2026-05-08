@@ -36,6 +36,7 @@ from ._shared import (
     _get_conn,
     _parse_quiz_args,
     _safe_log,
+    pending_pop,
 )
 
 logger = get_logger(__name__)
@@ -144,7 +145,7 @@ async def learn_batch_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     user_id = update.effective_user.id
 
-    word_ids = context.user_data.pop("pending_learn_ids", None) or []
+    word_ids = pending_pop(context, "pending_learn_ids") or []
     log_user_action(logger, user_id, f"/learn launched from /add (ids={word_ids})")
 
     await _drop_buttons(query, user_id)
