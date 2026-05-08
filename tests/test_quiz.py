@@ -14,6 +14,7 @@ from bot.quiz import (
     QuizQuestion,
     QuizSession,
     _word_score,
+    apply_results,
     build_quiz_session,
     check_answer,
     format_summary,
@@ -797,3 +798,98 @@ class TestFormatSummary:
         assert "<b>cat</b>" not in summary
         assert "&lt;script&gt;" in summary
         assert "&lt;b&gt;cat&lt;/b&gt;" in summary
+
+
+class TestApplyResultsAtomicity:
+    """Per-row (sm2_state + quiz_history) pair must be atomic. If sm2 upsert
+    fails, no quiz_history row should be written for that question — and
+    other questions in the session should still persist normally."""
+
+    async def test_failed_question_writes_neither_sm2_nor_history(self, db, monkeypatch):
+        import bot.quiz as q
+        from bot.database import add_word, get_sm2_state
+        from tests.helpers import graduate_word
+
+        wid_ok = await add_word(db, 12345, "adj", "schnell", "fast")
+        wid_bad = await add_word(db, 12345, "adj", "langsam", "slow")
+        await graduate_word(db, wid_ok)
+        await graduate_word(db, wid_bad)
+
+        # Snapshot pre-state
+        history_before = await db.execute(
+            "SELECT COUNT(*) FROM quiz_history WHERE user_id = ? AND word_id = ?",
+            (12345, wid_bad),
+        )
+        before_count = (await history_before.fetchone())[0]
+
+        questions = [
+            QuizQuestion(
+                word={
+                    "id": wid_ok,
+                    "user_id": 12345,
+                    "part_of_speech": "adj",
+                    "german": "schnell",
+                    "translation": "fast",
+                    "article": None,
+                    "plural": None,
+                    "partizip_ii": None,
+                    "irregular_forms": None,
+                },
+                quiz_type="translate",
+                prompt="x",
+                options=None,
+                correct_answer="schnell",
+            ),
+            QuizQuestion(
+                word={
+                    "id": wid_bad,
+                    "user_id": 12345,
+                    "part_of_speech": "adj",
+                    "german": "langsam",
+                    "translation": "slow",
+                    "article": None,
+                    "plural": None,
+                    "partizip_ii": None,
+                    "irregular_forms": None,
+                },
+                quiz_type="translate",
+                prompt="x",
+                options=None,
+                correct_answer="langsam",
+            ),
+        ]
+        session = QuizSession(
+            user_id=12345, questions=questions, current_index=2, results=[(4, True), (4, True)]
+        )
+
+        # Patch upsert to fail only for the bad word — quiz_history should NOT
+        # be written for that word either (savepoint rollback proves atomicity).
+        original_upsert = q.upsert_sm2_state
+
+        async def failing_upsert(conn, user_id, word_id, *args, **kwargs):
+            if word_id == wid_bad:
+                raise RuntimeError("boom")
+            return await original_upsert(conn, user_id, word_id, *args, **kwargs)
+
+        monkeypatch.setattr(q, "upsert_sm2_state", failing_upsert)
+        failures = await apply_results(db, session)
+        assert failures == 1
+
+        # Bad word: sm2_state NOT updated (graduate_word's last_quality=4 still there)
+        bad_state = await get_sm2_state(db, 12345, wid_bad, "translate")
+        assert bad_state is not None
+        # Bad word: NO new quiz_history row appended
+        history_after = await db.execute(
+            "SELECT COUNT(*) FROM quiz_history WHERE user_id = ? AND word_id = ?",
+            (12345, wid_bad),
+        )
+        after_count = (await history_after.fetchone())[0]
+        assert after_count == before_count, "quiz_history should not advance for failed word"
+
+        # Good word: history DID advance
+        good_history = await db.execute(
+            "SELECT COUNT(*) FROM quiz_history WHERE user_id = ? AND word_id = ?",
+            (12345, wid_ok),
+        )
+        good_count = (await good_history.fetchone())[0]
+        assert good_count >= 2  # graduate_word seeded 1, apply_results added 1 more

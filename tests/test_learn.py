@@ -328,6 +328,52 @@ class TestApplyGraduations:
         assert graduated == 0
         assert await get_sm2_state(db, USER_ID, wid, "translate") is None
 
+    async def test_savepoint_failure_isolates_one_pair(self, db, monkeypatch):
+        """If sm2 upsert fails for one (word, quiz_type) pair, the SAVEPOINT
+        rollback must keep the other pairs and the rest of the batch intact."""
+        import bot.learn as learn_module
+
+        wid_ok = await add_word(db, USER_ID, "adj", "schnell", "fast")
+        wid_bad = await add_word(db, USER_ID, "adj", "langsam", "slow")
+        word_ok = _word(wid_ok, pos="adj", german="schnell", translation="fast")
+        word_bad = _word(wid_bad, pos="adj", german="langsam", translation="slow")
+        s = LearnSession(
+            user_id=USER_ID,
+            steps=[_show(word_ok), _show(word_bad)],
+            required_per_word={wid_ok: {SHOW, MC, TYPED}, wid_bad: {SHOW, MC, TYPED}},
+            word_step_passed={
+                wid_ok: {SHOW, MC, TYPED},
+                wid_bad: {SHOW, MC, TYPED},
+            },
+        )
+
+        original_upsert = learn_module.upsert_sm2_state
+
+        async def selective_failure(conn, user_id, word_id, *args, **kwargs):
+            # Fail only for wid_bad+translate; everything else works.
+            if word_id == wid_bad and args and args[0] == "translate":
+                raise RuntimeError("savepoint should isolate this")
+            if word_id == wid_bad and "quiz_type" in kwargs and kwargs["quiz_type"] == "translate":
+                raise RuntimeError("savepoint should isolate this")
+            return await original_upsert(conn, user_id, word_id, *args, **kwargs)
+
+        monkeypatch.setattr(learn_module, "upsert_sm2_state", selective_failure)
+        graduated = await apply_graduations(db, s)
+        # Both words still report as graduated (count is by required_per_word, not
+        # per-pair). The point is the batch survives — we then prove the OK pair
+        # actually committed.
+        assert graduated == 2
+        ok_state = await get_sm2_state(db, USER_ID, wid_ok, "translate")
+        assert ok_state is not None  # OK pair persisted
+
+    def test_show_prompt_includes_tags(self):
+        """SHOW step prompt surfaces the word's tags when present (line 158)."""
+        from bot.learn import _show_prompt
+
+        word = _word(1, pos="adj", german="schnell", translation="fast", tags="A1,speed")
+        prompt = _show_prompt(word)
+        assert "A1,speed" in prompt
+
 
 # --- format_summary ---
 
