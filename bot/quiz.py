@@ -12,17 +12,29 @@ from bot.database import (
     upsert_sm2_state,
 )
 from bot.logging_config import get_logger, log_user_action, log_user_error, log_user_warning
+from bot.questions import (
+    german_with_article,
+    is_correct,
+    multiple_choice_options,
+)
 from bot.sm2 import calculate_sm2, sm2_from_db
-from bot.umlaut import answers_match
 
 logger = get_logger(__name__)
 
 
-def german_with_article(word: dict) -> str:
-    """Return 'article german' for nouns with articles, else just 'german'."""
-    if word.get("part_of_speech") == "n" and word.get("article"):
-        return f"{word['article']} {word['german']}"
-    return word["german"]
+# Backward-compat re-export for tests / external callers that imported this
+# from bot.quiz before it moved to bot.questions.
+__all__ = [
+    "QuizQuestion",
+    "QuizSession",
+    "apply_results",
+    "build_quiz_session",
+    "check_answer",
+    "format_summary",
+    "generate_question",
+    "german_with_article",
+    "select_quiz_type",
+]
 
 
 @dataclass
@@ -171,36 +183,13 @@ def _generate_translate(word: dict) -> QuizQuestion:
 
 def _generate_multiple_choice(word: dict, all_words: list[dict]) -> QuizQuestion:
     """German -> Translation: show German word, pick translation from options."""
-    pos = word["part_of_speech"]
-    word_id = word["id"]
-
-    # Collect wrong options: prefer same POS, then any POS.
-    # Shuffle each pool independently and concatenate (NOT shuffle the merged list)
-    # so same-POS distractors are exhausted before other-POS words appear.
-    same_pos = [w for w in all_words if w["part_of_speech"] == pos and w["id"] != word_id]
-    other = [w for w in all_words if w["part_of_speech"] != pos and w["id"] != word_id]
-    random.shuffle(same_pos)
-    random.shuffle(other)
-    wrong_pool = same_pos + other
-    wrong_translations = []
-    seen = {word["translation"].lower()}
-    for w in wrong_pool:
-        t = w["translation"]
-        if t.lower() not in seen:
-            wrong_translations.append(t)
-            seen.add(t.lower())
-        if len(wrong_translations) >= 3:
-            break
-
-    options = [word["translation"]] + wrong_translations
-    random.shuffle(options)
-
+    options, correct = multiple_choice_options(word, all_words)
     return QuizQuestion(
         word=word,
         quiz_type="multiple_choice",
         prompt=f"What does '{german_with_article(word)}' mean?",
         options=options,
-        correct_answer=word["translation"],
+        correct_answer=correct,
     )
 
 
@@ -317,8 +306,6 @@ def build_quiz_session(
 
 def check_answer(question: QuizQuestion, user_answer: str) -> bool:
     """Check if the user's answer is correct."""
-    if not user_answer or not user_answer.strip():
-        return False
     if not question.correct_answer:
         log_user_warning(
             logger,
@@ -326,9 +313,7 @@ def check_answer(question: QuizQuestion, user_answer: str) -> bool:
             f"Question for '{question.word['german']}' has no correct_answer",
         )
         return False
-    if question.quiz_type in ("multiple_choice", "article"):
-        return user_answer.strip().lower() == question.correct_answer.strip().lower()
-    return answers_match(user_answer, question.correct_answer)
+    return is_correct(question.quiz_type, user_answer, question.correct_answer)
 
 
 def format_summary(session: QuizSession) -> str:

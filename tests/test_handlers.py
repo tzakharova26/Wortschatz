@@ -755,7 +755,9 @@ class TestErrorHandler:
         await error_handler(None, fake_context)
 
     async def test_logs_traceback(self, fake_update, fake_context, caplog):
-        """Error handler must log with full traceback (exc_info=context.error)."""
+        """Error handler must log with full traceback. Specifically: a record
+        from ``bot.handlers.simple`` must carry ``exc_info`` whose first element
+        is the actual ValueError. Loose 'or' on getMessage was almost-unfailable."""
         import logging
 
         from bot.handlers import error_handler
@@ -767,8 +769,21 @@ class TestErrorHandler:
             fake_context.error = e
         with caplog.at_level(logging.ERROR):
             await error_handler(upd, fake_context)
-        # caplog records should include the traceback
-        assert any("ValueError" in r.getMessage() or r.exc_info for r in caplog.records)
+
+        matching = [
+            r
+            for r in caplog.records
+            if r.name == "bot.handlers.simple"
+            and r.exc_info is not None
+            and r.exc_info[0] is ValueError
+        ]
+        debug = [
+            (r.name, r.levelname, r.exc_info[0] if r.exc_info else None) for r in caplog.records
+        ]
+        assert matching, (
+            "expected an ERROR record from bot.handlers.simple with "
+            f"exc_info[0] is ValueError; got {debug}"
+        )
 
 
 class TestStatsCommand:
@@ -1462,32 +1477,58 @@ class TestSaveWordsValueError:
 
 class TestFinishQuizPartialFailure:
     async def test_one_word_fails_others_succeed(self, fake_update, fake_context, db, monkeypatch):
-        """If one upsert raises, the summary still includes a note about failures."""
+        """If one upsert raises, the summary still includes a note about failures.
+
+        Build the session by hand so the test deterministically exercises the
+        2-word failure branch — relying on quiz_start could give us a 1-word
+        session (cycling) and silently skip the assertion.
+        """
         import bot.handlers as h
-        from bot.database import add_word
+        import bot.quiz as q
+        from bot.database import add_quiz_history, add_word
+        from bot.handlers.quiz import _finish_quiz
+        from bot.quiz import QuizSession, _generate_translate
         from tests.helpers import graduate_word
 
         wid1 = await add_word(db, 12345, "adj", "schnell", "fast")
         wid2 = await add_word(db, 12345, "adj", "langsam", "slow")
         await graduate_word(db, wid1)
         await graduate_word(db, wid2)
-        upd = fake_update()
-        await h.quiz_start(upd, fake_context)
-        session = fake_context.user_data["quiz_session"]
-        # Force 2 translate questions
-        from bot.quiz import _generate_translate
 
-        session.questions = [_generate_translate(q.word) for q in session.questions[:2]]
-        if len(session.questions) < 2:
-            return  # skip if only 1 word selected for the session
-
-        # Mark both questions answered
-        session.results = [(4, True), (4, True)]
-        session.current_index = 2
+        # Build the QuizSession explicitly with two translate questions and
+        # both already marked answered+rated — no reliance on randomness.
+        word1 = {
+            "id": wid1,
+            "user_id": 12345,
+            "part_of_speech": "adj",
+            "german": "schnell",
+            "translation": "fast",
+            "article": None,
+            "plural": None,
+            "partizip_ii": None,
+            "irregular_forms": None,
+        }
+        word2 = {
+            "id": wid2,
+            "user_id": 12345,
+            "part_of_speech": "adj",
+            "german": "langsam",
+            "translation": "slow",
+            "article": None,
+            "plural": None,
+            "partizip_ii": None,
+            "irregular_forms": None,
+        }
+        questions = [_generate_translate(word1), _generate_translate(word2)]
+        session = QuizSession(
+            user_id=12345,
+            questions=questions,
+            current_index=2,
+            results=[(4, True), (4, True)],
+        )
+        fake_context.user_data["quiz_session"] = session
 
         # Patch upsert_sm2_state in bot.quiz (where apply_results uses it)
-        import bot.quiz as q
-
         original = q.upsert_sm2_state
 
         async def failing_upsert(conn, user_id, word_id, *args, **kwargs):
@@ -1497,13 +1538,24 @@ class TestFinishQuizPartialFailure:
 
         monkeypatch.setattr(q, "upsert_sm2_state", failing_upsert)
 
-        # Build a fake query with .message.reply_text
         fake_query = fake_update(callback_data="rate:4")
-        result = await h._finish_quiz(fake_query.callback_query, fake_context)
+        result = await _finish_quiz(fake_query.callback_query, fake_context)
         assert result == h.ConversationHandler.END
-        # Last reply should be the summary including the failure note
+        # Summary mentions the failure note
         summary = fake_query.callback_query.message.reply_text.call_args.args[0]
         assert "could not be saved" in summary
+
+        # And the surviving word's history DID advance — that's the "others succeed" half.
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM quiz_history WHERE user_id = ? AND word_id = ?",
+            (12345, wid2),
+        )
+        wid2_history_count = (await cursor.fetchone())[0]
+        # graduate_word seeded 1 row; apply_results adds one more for word2 (the OK one).
+        assert wid2_history_count >= 2
+
+        # Suppress unused-import lint
+        _ = add_quiz_history
 
 
 class TestApplyResultsAtomicity:

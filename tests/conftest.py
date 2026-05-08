@@ -3,17 +3,22 @@ from unittest.mock import AsyncMock, MagicMock
 import aiosqlite
 import pytest
 
-from bot.database import SCHEMA
+from bot.database import _apply_schema
 
 
 @pytest.fixture
 async def db():
-    """Provide an in-memory SQLite connection with schema initialized."""
+    """In-memory SQLite connection initialized via the same code path as
+    production (SCHEMA + _migrate). Using ``init_db(":memory:")`` directly
+    doesn't work because SQLite's in-memory DB is per-connection — it would
+    vanish when init_db closed its own connection. Instead we mirror the
+    flow: open the connection here, then apply the same schema/migrations
+    helper init_db uses, so future migrations get test coverage automatically.
+    """
     conn = await aiosqlite.connect(":memory:")
     await conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = aiosqlite.Row
-    await conn.executescript(SCHEMA)
-    await conn.commit()
+    await _apply_schema(conn)
     yield conn
     await conn.close()
 

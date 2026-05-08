@@ -156,9 +156,7 @@ async def init_db(db_path: str = DB_PATH) -> None:
     conn = None
     try:
         conn = await get_connection(db_path)
-        await conn.executescript(SCHEMA)
-        await _migrate(conn)
-        await conn.commit()
+        await _apply_schema(conn)
         logger.info("Database initialized", extra={"user_id": "system"})
     except Exception:
         logger.error("Failed to initialize database", extra={"user_id": "system"}, exc_info=True)
@@ -166,6 +164,18 @@ async def init_db(db_path: str = DB_PATH) -> None:
     finally:
         if conn is not None:
             await conn.close()
+
+
+async def _apply_schema(conn: aiosqlite.Connection) -> None:
+    """Apply SCHEMA + run migrations on an existing connection.
+
+    Extracted so tests can reuse the exact production setup on their own
+    in-memory connection — ``init_db(":memory:")`` won't work because the
+    in-memory DB dies when ``init_db`` closes its own connection.
+    """
+    await conn.executescript(SCHEMA)
+    await _migrate(conn)
+    await conn.commit()
 
 
 async def _migrate(conn: aiosqlite.Connection) -> None:

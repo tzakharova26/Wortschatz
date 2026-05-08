@@ -24,9 +24,12 @@ from bot.database import (
     upsert_sm2_state,
 )
 from bot.logging_config import get_logger, log_user_action, log_user_error
-from bot.quiz import _generate_multiple_choice, german_with_article
+from bot.questions import (
+    german_with_article,
+    is_correct,
+    multiple_choice_options,
+)
 from bot.sm2 import QUALITY_CORRECT, calculate_sm2, sm2_from_db
-from bot.umlaut import answers_match
 
 logger = get_logger(__name__)
 
@@ -167,13 +170,13 @@ def _build_show_step(word: dict) -> LearnStep:
 
 
 def _build_mc_step(word: dict, all_words: list[dict]) -> LearnStep:
-    q = _generate_multiple_choice(word, all_words)
+    options, correct = multiple_choice_options(word, all_words)
     return LearnStep(
-        word=q.word,
+        word=word,
         step_type=MC,
-        prompt=q.prompt,
-        options=q.options,
-        correct_answer=q.correct_answer,
+        prompt=f"What does '{german_with_article(word)}' mean?",
+        options=options,
+        correct_answer=correct,
     )
 
 
@@ -267,16 +270,11 @@ def build_session(user_id: int, words: list[dict], all_words: list[dict]) -> Lea
 
 
 def check_answer(step: LearnStep, user_answer: str) -> bool:
-    """Validate an answer for a non-show step. Mirrors quiz.check_answer."""
+    """Validate an answer for a step. SHOW always passes; everything else
+    delegates to ``bot.questions.is_correct``."""
     if step.step_type == SHOW:
-        # SHOW always passes — user just acknowledged the card.
         return True
-    if not user_answer or not user_answer.strip():
-        return False
-    correct = step.correct_answer or ""
-    if step.step_type in (MC, ARTICLE):
-        return user_answer.strip().lower() == correct.strip().lower()
-    return answers_match(user_answer, correct)
+    return is_correct(step.step_type, user_answer, step.correct_answer or "")
 
 
 # --- Graduation ---
