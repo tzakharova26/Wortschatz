@@ -72,7 +72,9 @@ async def _send_learn_step(reply_target, context: ContextTypes.DEFAULT_TYPE) -> 
 
     markup = _build_learn_step_markup(step)
     idx = session.current_index + 1
-    total = len(session.steps)
+    # Retries get appended to ``steps`` only at end-of-main-run, but the user
+    # should see the counter grow as soon as a wrong answer queues a retry.
+    total = len(session.steps) + len(session.retry_queue)
     retry_tag = " (retry)" if step.is_retry else ""
     if step.step_type == learn_core.SHOW:
         text = f"<b>Step {idx}/{total} — see card</b>{retry_tag}\n\n{step.prompt}"

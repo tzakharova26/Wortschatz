@@ -201,12 +201,16 @@ def _build_article_step(word: dict) -> LearnStep:
 
 
 def _build_plural_step(word: dict) -> LearnStep:
+    # German plural article is always "die"; storing it on the answer means the
+    # feedback text shows "die Katzen" — reinforcing the article alongside the
+    # plural. ``is_correct("plural", ...)`` accepts user input either with or
+    # without the leading "die ", so this is display-only enrichment.
     return LearnStep(
         word=word,
         step_type=PLURAL,
         prompt=f"Type the plural of '{german_with_article(word)}'",
         options=None,
-        correct_answer=word["plural"],
+        correct_answer=f"die {word['plural']}",
     )
 
 

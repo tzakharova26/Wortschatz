@@ -144,7 +144,7 @@ class TestBuildSession:
         assert types == [SHOW, MC, TYPED, ARTICLE, PLURAL]
         # plural step should ask for the plural with article context
         plural_step = s.steps[-1]
-        assert plural_step.correct_answer == "Katzen"
+        assert plural_step.correct_answer == "die Katzen"
         assert "die Katze" in plural_step.prompt
 
     def test_noun_without_plural_skips_plural_step(self):
@@ -290,6 +290,52 @@ class TestCheckAnswer:
         w = _word(1)
         assert check_answer(_typed(w), "   ") is False
         assert check_answer(_mc(w), "") is False
+
+    def test_plural_accepts_umlaut_digraph(self):
+        """User typing 'haefen' for stored plural 'Häfen' must count as right."""
+        w = _word(1, pos="n", german="Hafen", article="der", plural="Häfen", translation="harbor")
+        step = LearnStep(
+            word=w,
+            step_type=PLURAL,
+            prompt="plural?",
+            options=None,
+            correct_answer="die Häfen",
+        )
+        assert check_answer(step, "haefen") is True
+        assert check_answer(step, "die haefen") is True
+        assert check_answer(step, "Häfen") is True
+        assert check_answer(step, "die Häfen") is True
+        assert check_answer(step, "Hafen") is False  # missing umlaut, no digraph
+
+    def test_plural_accepts_ss_for_eszett(self):
+        """User typing 'Strassen' (ss) for stored 'Straßen' (ß) must count as right."""
+        w = _word(
+            1, pos="n", german="Straße", article="die", plural="Straßen", translation="street"
+        )
+        step = LearnStep(
+            word=w,
+            step_type=PLURAL,
+            prompt="plural?",
+            options=None,
+            correct_answer="die Straßen",
+        )
+        assert check_answer(step, "Strassen") is True
+        assert check_answer(step, "die Strassen") is True
+        assert check_answer(step, "Straßen") is True
+
+    def test_plural_strips_die_on_either_side(self):
+        """``die <plural>`` and bare ``<plural>`` are interchangeable."""
+        w = _word(1, pos="n", german="Katze", article="die", plural="Katzen", translation="cat")
+        step = LearnStep(
+            word=w,
+            step_type=PLURAL,
+            prompt="plural?",
+            options=None,
+            correct_answer="die Katzen",
+        )
+        assert check_answer(step, "Katzen") is True
+        assert check_answer(step, "die Katzen") is True
+        assert check_answer(step, "der Katzen") is False  # wrong article still rejected
 
 
 # --- apply_graduations ---

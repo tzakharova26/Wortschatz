@@ -228,12 +228,16 @@ def _generate_plural(word: dict) -> QuizQuestion:
             f"Plural quiz for '{word['german']}' without plural, falling back to translate",
         )
         return _generate_translate(word)
+    # Same article-on-display trick as ``learn._build_plural_step``: store the
+    # answer with the "die" prefix so feedback/summary lines show the article,
+    # while the matcher (``is_correct("plural", ...)``) accepts input either
+    # with or without it.
     return QuizQuestion(
         word=word,
         quiz_type="plural",
         prompt=f"What is the plural of '{german_with_article(word)}'?",
         options=None,
-        correct_answer=plural,
+        correct_answer=f"die {plural}",
     )
 
 

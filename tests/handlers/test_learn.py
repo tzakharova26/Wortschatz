@@ -289,6 +289,35 @@ class TestLearnConversation:
         text = upd.callback_query.message.reply_text.call_args.args[0]
         assert "no longer available" in text.lower()
 
+    async def test_step_counter_grows_when_answer_wrong(self, fake_update, fake_context, db):
+        """A wrong answer queues a retry; the rendered ``Step X/Y`` should
+        immediately show Y incremented, even though the retry isn't appended
+        to ``session.steps`` until the main run finishes."""
+        # Seed a second word so the MC step has a real distractor to tap.
+        # The /learn pool is filtered to a single word via word_ids.
+        target = await add_word(db, 12345, "adj", "schnell", "fast")
+        await add_word(db, 12345, "adj", "langsam", "slow")
+        fake_context.user_data["pending_learn_ids"] = [target]
+        await learn_batch_callback(fake_update(callback_data="lbatch:go"), fake_context)
+        session = fake_context.user_data["learn_session"]
+        assert len(session.steps) == 3  # adj → SHOW, MC, TYPED
+
+        # Step 1: SHOW → tap "Got it" (correct). Next render shows step 2 of 3.
+        upd_show = fake_update(callback_data="lshow:ok")
+        await learn_button_answer(upd_show, fake_context)
+        text_after_show = upd_show.callback_query.message.reply_text.call_args.args[0]
+        assert "Step 2/3" in text_after_show
+
+        # Step 2: MC → wrong → counter must show 4 because retry is queued.
+        mc_step = session.steps[1]
+        wrong_choice = next(o for o in mc_step.options if o != mc_step.correct_answer)
+        upd_mc = fake_update(callback_data=f"lmc:{wrong_choice}")
+        await learn_button_answer(upd_mc, fake_context)
+        text_after_wrong = upd_mc.callback_query.message.reply_text.call_args.args[0]
+        assert (
+            "Step 3/4" in text_after_wrong
+        ), f"Counter should grow on wrong answer; got: {text_after_wrong!r}"
+
     async def test_learn_cancel_persists_partial_graduation(self, fake_update, fake_context, db):
         """If a word fully graduated before cancel, its graduation must persist."""
         from bot.database import get_due_words

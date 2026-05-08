@@ -310,7 +310,7 @@ class TestGenerateQuestion:
         q = generate_question(word, "plural", [word])
         assert q.quiz_type == "plural"
         assert q.options is None
-        assert q.correct_answer == "Katzen"
+        assert q.correct_answer == "die Katzen"
         assert "die Katze" in q.prompt
 
     def test_plural_quiz_no_plural_falls_back(self):

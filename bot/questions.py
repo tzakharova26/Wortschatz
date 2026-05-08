@@ -59,6 +59,20 @@ def multiple_choice_options(word: dict, all_words: list[dict]) -> tuple[list[str
 _BUTTON_KINDS = frozenset({"multiple_choice", "article"})
 
 
+def _strip_plural_article(text: str) -> str:
+    """Drop a leading "die " (case-insensitive) from a plural answer.
+
+    Plural in German always takes "die"; we accept user input both with and
+    without it. The stored ``correct_answer`` for plural quizzes/learn-steps
+    is "die <plural>" so display lines carry the article — but matching
+    must not require the user to type it.
+    """
+    s = text.strip()
+    if s.lower().startswith("die "):
+        return s[4:].strip()
+    return s
+
+
 def is_correct(kind: str, user_answer: str, correct_answer: str) -> bool:
     """Compare a user answer to the stored correct answer for a question of
     the given kind. SHOW-style steps never call this — they always pass.
@@ -66,7 +80,8 @@ def is_correct(kind: str, user_answer: str, correct_answer: str) -> bool:
     Button-tap kinds (multiple_choice, article) use case-insensitive exact
     match. Typed kinds (translate, verb_forms, plural) use ``answers_match``,
     which permits ASCII digraphs (ae/oe/ue/ss) but rejects extra umlauts the
-    stored answer doesn't have.
+    stored answer doesn't have. For ``plural`` an optional leading "die " is
+    stripped from both sides before comparison.
     """
     if not user_answer or not user_answer.strip():
         return False
@@ -74,4 +89,9 @@ def is_correct(kind: str, user_answer: str, correct_answer: str) -> bool:
         return False
     if kind in _BUTTON_KINDS:
         return user_answer.strip().lower() == correct_answer.strip().lower()
+    if kind == "plural":
+        return answers_match(
+            _strip_plural_article(user_answer),
+            _strip_plural_article(correct_answer),
+        )
     return answers_match(user_answer, correct_answer)
