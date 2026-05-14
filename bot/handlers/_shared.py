@@ -58,6 +58,7 @@ def pending_pop(context: ContextTypes.DEFAULT_TYPE, key: str) -> Any:
 # preserves backward compatibility with imports of the form
 # ``from bot.handlers import LEARN_ANSWERING``.
 ADD_WORDS, ADD_CONFIRM, QUIZ_ANSWERING, QUIZ_RATING, LEARN_ANSWERING = range(5)
+CONTACT_WRITING = 5
 
 
 # Callback data prefixes
@@ -70,6 +71,7 @@ CB_LEARN_SHOW = "lshow:"
 CB_LEARN_MC = "lmc:"
 CB_LEARN_ART = "lart:"
 CB_LEARN_BATCH = "lbatch:"  # Post-/add "Start learning" button
+CB_OWNER = "owner:"
 
 
 def _get_conn(context: ContextTypes.DEFAULT_TYPE):

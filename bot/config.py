@@ -1,3 +1,5 @@
+import os
+
 QUIZ_SESSION_SIZE = 7
 QUIZ_MAX_SIZE = 50  # upper bound on user-requested quiz size
 MAX_QUIZ_SESSION_MULTIPLIER = 2  # misspell repeats cannot grow a session beyond this
@@ -23,6 +25,26 @@ MAX_TAG_LENGTH = 32
 MAX_REMINDERS_PER_USER = 10
 DB_SIZE_WARNING_MB = 100
 DB_SIZE_HARD_LIMIT_MB = 500
+
+OWNER_TG_NICKNAME_ENV = "OWNER_TG_NICKNAME"
+OWNER_USER_ID_ENV = "OWNER_USER_ID"
+DEFAULT_OWNER_TG_NICKNAME = "tatiana_zakhar"
+MAX_OWNER_MESSAGE_CHARS = 2000
+
+
+def get_owner_tg_nickname() -> str:
+    return os.getenv(OWNER_TG_NICKNAME_ENV, DEFAULT_OWNER_TG_NICKNAME).strip()
+
+
+def get_owner_user_id() -> int | None:
+    raw = os.getenv(OWNER_USER_ID_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
 
 LEARN_START_MESSAGE = (
     "Learning {n} word(s). Each word steps through:\n"

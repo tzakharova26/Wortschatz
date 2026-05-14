@@ -19,6 +19,7 @@ Wortschatz/
     main.py            # Entry point, application setup
     handlers/          # Telegram command & conversation handlers
       add.py
+      contact.py
       learn.py
       quiz.py
       reminders.py
@@ -43,6 +44,7 @@ Wortschatz/
     helpers.py         # Test helpers (e.g. graduate_word to seed /quiz pool)
     handlers/
       test_add.py
+      test_contact.py
       test_learn.py
       test_parsers.py
       test_quiz.py
@@ -73,6 +75,7 @@ Wortschatz/
 - Word cards can be in any language pair (German + user's choice)
 - Russian and other UTF-8 translations are fully supported
 - If a user action hits a configured safety bound, the bot must not partially write data. It should stop the operation, show a clear explanation, and log a `WARNING` with `user_id`.
+- Owner contact is configured with `OWNER_TG_NICKNAME` and `OWNER_USER_ID`. Anonymous letters to the owner must not include sender info in the forwarded message.
 
 ## Word Card Model
 
@@ -272,6 +275,7 @@ demotes the word back into `/learn` and it is not counted as currently learned u
 | `/remindme HH:MM [tz]` | Add a daily quiz reminder. Default timezone is `Europe/Berlin`. Multiple reminders per user supported. |
 | `/reminders` | List user's reminders with each one's source time and Berlin/Moscow equivalents. |
 | `/remindoff <id\|all>` | Remove a specific reminder (by id) or all of them. |
+| `/contact` | Show owner contact info and allow an anonymous letter to be sent to `OWNER_USER_ID`. |
 
 ## Statistics (`/stats`)
 - Starts with a **Learning queue** block:
@@ -302,6 +306,7 @@ Configured in `bot/config.py` and enforced before writes where applicable:
 | `LEARN_MAX_SIZE` | 20 | `/learn` request size is capped |
 | `QUIZ_MAX_SIZE` | 50 | `/quiz` request size is capped |
 | `MAX_QUIZ_SESSION_MULTIPLIER` | 2 | Misspell repeats cannot grow a quiz above twice its initial length |
+| `MAX_OWNER_MESSAGE_CHARS` | 2000 | Anonymous owner letters longer than this are rejected |
 | `DB_SIZE_WARNING_MB` | 100 MB | Write-intended commands log a warning but continue |
 | `DB_SIZE_HARD_LIMIT_MB` | 500 MB | Write-intended commands are rejected before saving |
 
@@ -379,8 +384,15 @@ CREATE INDEX idx_reminders_user_id ON reminders(user_id);
 - Daily firing handled by python-telegram-bot's `JobQueue` (requires `[job-queue]` extra → APScheduler)
 - Each job is named `reminder_{id}` so it can be individually cancelled
 - On every bot startup, `load_all_reminders` repopulates the JobQueue from the DB (jobs are in-memory only)
-- Reminder messages include a short practice prompt plus the learning overview (ready to review, waiting to learn, in rotation) when the DB connection is available. Send failures (e.g., user blocked the bot) are caught and logged; the DB row is preserved so reminders resume if the user unblocks.
+- Reminder messages include a short practice prompt plus the learning overview (ready to review, waiting to learn, in rotation) when the DB connection is available, and show reply keyboard buttons for `/add`, `/quiz`, and `/learn`. Send failures (e.g., user blocked the bot) are caught and logged; the DB row is preserved so reminders resume if the user unblocks.
 - `/reminders` displays both Berlin and Moscow times for each entry, regardless of source TZ; uses today's date as DST reference
+
+## Owner Contact
+- `/contact` and the `/help` "Contact owner" button show a short contact page.
+- `OWNER_TG_NICKNAME` is displayed for direct contact. Default is `tatiana_zakhar`; store it with or without `@`; UI normalizes it.
+- `OWNER_USER_ID` is the Telegram chat id that receives anonymous letters.
+- Anonymous letters are sent as bot-authored messages with no Telegram sender id, username, or profile metadata.
+- If `OWNER_USER_ID` is missing/invalid, the bot explains that anonymous letters are not configured and points the user to direct contact.
 
 ## Development
 ```bash

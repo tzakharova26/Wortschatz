@@ -61,6 +61,11 @@ class FakeCallbackQuery:
 
 
 @dataclass
+class FakeBot:
+    send_message: AsyncMock = field(default_factory=AsyncMock)
+
+
+@dataclass
 class FakeUpdate:
     """Mimics ``telegram.Update``. Exactly one of ``message`` / ``callback_query``
     is populated to match how PTB delivers updates; ``effective_message`` aliases
@@ -83,6 +88,7 @@ class FakeContext:
     args: list[str] = field(default_factory=list)
     error: BaseException | None = None
     application: Any = None
+    bot: FakeBot = field(default_factory=FakeBot)
 
 
 @pytest.fixture

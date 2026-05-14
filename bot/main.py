@@ -10,6 +10,7 @@ from bot.handlers import (
     delete_confirm_command,
     error_handler,
     get_add_conversation,
+    get_contact_conversation,
     get_learn_conversation,
     get_quiz_conversation,
     help_callback,
@@ -64,6 +65,7 @@ def main() -> None:
     app.add_handler(get_add_conversation())
     app.add_handler(get_learn_conversation())
     app.add_handler(get_quiz_conversation())
+    app.add_handler(get_contact_conversation())
 
     # Simple commands
     app.add_handler(CommandHandler("start", start_command))

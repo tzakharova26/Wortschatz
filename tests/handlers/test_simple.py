@@ -33,7 +33,7 @@ class TestConstants:
         assert "Cancel" in ADD_FORMAT_MESSAGE
 
     def test_start_message_has_all_commands(self):
-        for cmd in ("/add", "/list", "/tags", "/delete", "/quiz", "/stats", "/help"):
+        for cmd in ("/add", "/list", "/tags", "/delete", "/quiz", "/stats", "/help", "/contact"):
             assert cmd in START_MESSAGE
         # Should also explain rating buttons (via QUIZ_START_MESSAGE)
         assert "Misspell" in START_MESSAGE
@@ -227,6 +227,7 @@ class TestStartHelp:
         assert "Commands" in button_texts
         assert "How to add words" in button_texts
         assert "Learn & quiz" in button_texts
+        assert "Contact owner" in button_texts
 
 
 class TestHelpCallback:

@@ -19,6 +19,7 @@ from bot.stats import get_user_stats
 
 from ._shared import (
     CB_HELP,
+    CB_OWNER,
     PENDING_DELETE_TTL_S,
     _format_word_tables,
     _get_conn,
@@ -45,6 +46,7 @@ COMMANDS_HELP = (
     "/remindme HH:MM [tz] — add a daily practice reminder (default Europe/Berlin)\n"
     "/reminders — list your reminders (Berlin/Moscow times)\n"
     "/remindoff &lt;id|all&gt; — remove a reminder\n"
+    "/contact — contact the owner or send an anonymous letter\n"
     "/help — interactive help menu\n"
     "/cancel — abort an active quiz (partial progress is saved)"
 )
@@ -69,6 +71,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             InlineKeyboardButton("Commands", callback_data=f"{CB_HELP}commands"),
             InlineKeyboardButton("How to add words", callback_data=f"{CB_HELP}add"),
             InlineKeyboardButton("Learn & quiz", callback_data=f"{CB_HELP}practice"),
+            InlineKeyboardButton("Contact owner", callback_data=f"{CB_OWNER}info"),
         ]
     ]
     await update.message.reply_text(
@@ -85,6 +88,16 @@ async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     query = update.callback_query
     await query.answer()
     topic = query.data.removeprefix(CB_HELP)
+
+    if query.data and query.data.startswith(CB_OWNER):
+        from .contact import _contact_keyboard, _contact_text
+
+        await query.edit_message_text(
+            _contact_text(),
+            parse_mode="HTML",
+            reply_markup=_contact_keyboard(),
+        )
+        return
 
     if topic == "commands":
         text = COMMANDS_HELP

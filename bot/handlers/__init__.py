@@ -31,7 +31,9 @@ from ._shared import (
     CB_LEARN_MC,
     CB_LEARN_SHOW,
     CB_MC,
+    CB_OWNER,
     CB_RATE,
+    CONTACT_WRITING,
     LEARN_ANSWERING,
     PENDING_DELETE_TTL_S,
     PENDING_LEARN_TTL_S,
@@ -54,6 +56,15 @@ from .add import (
     add_start,
     add_words_received,
     get_add_conversation,
+)
+
+# /contact owner
+from .contact import (
+    contact_callback,
+    contact_cancel,
+    contact_command,
+    contact_message,
+    get_contact_conversation,
 )
 
 # /learn
@@ -124,8 +135,10 @@ __all__ = [
     "CB_LEARN_MC",
     "CB_LEARN_SHOW",
     "CB_MC",
+    "CB_OWNER",
     "CB_RATE",
     "COMMANDS_HELP",
+    "CONTACT_WRITING",
     "ConversationHandler",
     "LEARN_ANSWERING",
     "PENDING_DELETE_TTL_S",
@@ -133,6 +146,12 @@ __all__ = [
     "QUIZ_ANSWERING",
     "QUIZ_RATING",
     "START_MESSAGE",
+    # /contact owner
+    "contact_callback",
+    "contact_cancel",
+    "contact_command",
+    "contact_message",
+    "get_contact_conversation",
     # /add
     "add_callback",
     "add_skip",

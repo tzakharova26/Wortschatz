@@ -12,6 +12,7 @@ from bot.database import (
 )
 from bot.reminders import (
     DEFAULT_TZ,
+    REMINDER_KEYBOARD,
     _reminder_callback,
     cancel_reminder,
     format_in_zones,
@@ -209,6 +210,9 @@ class TestReminderCallback:
         call = context.bot.send_message.await_args
         assert call.kwargs["chat_id"] == USER_ID
         assert call.kwargs["parse_mode"] == "HTML"
+        assert call.kwargs["reply_markup"] == REMINDER_KEYBOARD
+        buttons = call.kwargs["reply_markup"].keyboard[0]
+        assert [button.text for button in buttons] == ["/add", "/quiz", "/learn"]
         text = call.kwargs["text"]
         assert "Ready to review" in text
         assert "Waiting to learn" in text

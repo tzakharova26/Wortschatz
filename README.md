@@ -15,7 +15,8 @@ The bot focuses on the parts of German that are easy to forget in a plain word l
 - Uses word-level SM-2 scheduling, while quiz type is chosen randomly for variety.
 - Lets the user self-rate answers with Anki-style buttons: Good, Easy, Wrong, Blackout, or Misspell.
 - Tracks daily, weekly, monthly, and overall statistics.
-- Sends daily reminders with timezone support and a compact learning overview.
+- Sends daily reminders with timezone support, a compact learning overview, and quick command buttons.
+- Lets users contact the owner directly or send an anonymous letter through the bot.
 - Provides a read-only SQLite web UI for inspecting the database.
 
 ## Learning Flow
@@ -96,6 +97,7 @@ Then it shows today, week, month, and overall counts for completed quizzes, adde
 | `/remindme HH:MM [tz]` | Add a daily reminder |
 | `/reminders` | List reminders |
 | `/remindoff <id\|all>` | Remove reminders |
+| `/contact` | Show owner contact info or send an anonymous letter |
 | `/cancel` | Cancel the current conversation |
 
 ## German Input Details
@@ -139,6 +141,7 @@ Current limits:
 - `/quiz` capped at 50 questions
 - misspell repeats capped at twice the initial quiz length
 - database size warning at 100 MB, hard write stop at 500 MB
+- anonymous owner letters capped at 2000 characters
 
 ## Tech Stack
 
@@ -163,6 +166,7 @@ bot/
   sm2.py               spaced repetition algorithm
   questions.py         shared answer matching and MC option helpers
   reminders.py         reminder scheduling
+  handlers/contact.py  owner contact and anonymous letter flow
   stats.py             stats formatting
   umlaut.py            umlaut-aware matching utilities
 tests/
@@ -182,6 +186,15 @@ cp .env.example .env
 ```
 
 Set `BOT_TOKEN` in `.env`, then run:
+
+Optional owner-contact settings:
+
+```text
+OWNER_TG_NICKNAME=tatiana_zakhar
+OWNER_USER_ID=123456789
+```
+
+`OWNER_TG_NICKNAME` is shown to users for direct contact. `OWNER_USER_ID` is the Telegram chat id that receives anonymous letters.
 
 ```bash
 .venv/bin/python -m bot.main

@@ -11,6 +11,7 @@ from datetime import datetime, time
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiosqlite
+from telegram import ReplyKeyboardMarkup
 from telegram.ext import Application, ContextTypes
 
 from bot.database import get_all_reminders, get_learning_overview
@@ -22,6 +23,12 @@ logger = get_logger(__name__)
 DEFAULT_TZ = "Europe/Berlin"
 DISPLAY_ZONES = ["Europe/Berlin", "Europe/Moscow"]
 REMINDER_MESSAGE = "Time to practice German! Send /quiz to revise or /learn for new words."
+REMINDER_KEYBOARD = ReplyKeyboardMarkup(
+    [["/add", "/quiz", "/learn"]],
+    resize_keyboard=True,
+    one_time_keyboard=True,
+    input_field_placeholder="Choose a practice command",
+)
 
 
 def job_name(reminder_id: int) -> str:
@@ -60,7 +67,12 @@ async def _reminder_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
         if conn is not None:
             overview = await get_learning_overview(conn, user_id)
             text += "\n\n" + format_learning_overview(overview)
-        await context.bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=text,
+            parse_mode="HTML",
+            reply_markup=REMINDER_KEYBOARD,
+        )
     except Exception as e:
         log_user_error(logger, user_id, f"Failed to send reminder: {e}", exc_info=e)
 
