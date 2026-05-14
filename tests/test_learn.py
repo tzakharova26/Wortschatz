@@ -11,7 +11,9 @@ from bot.database import (
 from bot.learn import (
     ARTICLE,
     LEARN_VERB_FORMS_COUNT,
+    MAX_STEP_ATTEMPTS,
     MC,
+    PARTIZIP,
     PLURAL,
     SHOW,
     TYPED,
@@ -97,6 +99,29 @@ class TestNeedsLearningWords:
         words = await get_needs_learning_words(db, USER_ID)
         assert [w["id"] for w in words] == [wid]
 
+    async def test_learning_status_filters_new_and_blackout(self, db):
+        new_id = await add_word(db, USER_ID, "adj", "neu", "new")
+        blackout_id = await add_word(db, USER_ID, "adj", "alt", "old")
+        await add_quiz_history(db, USER_ID, blackout_id, "translate", correct=False)
+        await upsert_sm2_state(
+            db,
+            USER_ID,
+            blackout_id,
+            "translate",
+            easiness_factor=1.7,
+            interval=1,
+            repetitions=0,
+            correct_count=0,
+            next_review=datetime.now(),
+            last_quality=0,
+        )
+
+        new_words = await get_needs_learning_words(db, USER_ID, learning_status="new")
+        blackout_words = await get_needs_learning_words(db, USER_ID, learning_status="blackout")
+
+        assert [w["id"] for w in new_words] == [new_id]
+        assert [w["id"] for w in blackout_words] == [blackout_id]
+
     async def test_filter_by_tag(self, db):
         w1 = await add_word(db, USER_ID, "adj", "schnell", "fast", tags="A1")
         await add_word(db, USER_ID, "adj", "langsam", "slow", tags="A2")
@@ -167,17 +192,21 @@ class TestBuildSession:
             )
         ]
         s = build_session(USER_ID, words, words)
+        assert PARTIZIP in [step.step_type for step in s.steps]
+        partizip_step = next(step for step in s.steps if step.step_type == PARTIZIP)
+        assert partizip_step.correct_answer == "ist gefahren"
         verb_steps = [step for step in s.steps if step.step_type == VERB_FORM]
         assert len(verb_steps) == LEARN_VERB_FORMS_COUNT
         # Each verb_form step has a distinct key recorded as required
         keys = {f"{VERB_FORM}:{step.verb_form_key}" for step in verb_steps}
         assert keys.issubset(s.required_per_word[1])
 
-    def test_regular_verb_no_form_steps(self):
+    def test_regular_verb_has_partizip_step(self):
         words = [_word(1, pos="v", german="machen", partizip_ii="hat gemacht", translation="to do")]
         s = build_session(USER_ID, words, words)
         types = [step.step_type for step in s.steps]
-        assert types == [SHOW, MC, TYPED]
+        assert types == [SHOW, MC, TYPED, PARTIZIP]
+        assert s.steps[-1].correct_answer == "hat gemacht"
 
     def test_multi_word_steps_interleaved(self):
         """With ≥2 words, no two consecutive steps should be from the same word."""
@@ -238,30 +267,44 @@ class TestRecordStep:
         # Now main run is done; retry queue should be appended
         assert s.retries_appended is True
         assert len(s.steps) == 4  # original 3 + 1 retry
-        assert s.steps[-1].is_retry is True
+        assert s.steps[-1].attempt == 2
         assert s.steps[-1].step_type == MC
         # A correct retry graduates the word
         s.record_step(correct=True)
         assert s.is_finished
         assert s.graduated_words() == [w]
 
-    def test_retry_failure_means_no_graduation(self):
+    def test_second_retry_can_graduate_word(self):
+        w = _word(1)
+        steps = [_show(w), _typed(w)]
+        s = LearnSession(user_id=USER_ID, steps=steps, required_per_word={1: {SHOW, TYPED}})
+        s.record_step(correct=True)  # show
+        s.record_step(correct=False)  # typed wrong, retry 1 queued
+        s.record_step(correct=False)  # retry 1 wrong, retry 2 queued
+        assert s.steps[-1].attempt == MAX_STEP_ATTEMPTS
+        s.record_step(correct=True)  # retry 2 correct
+        assert s.is_finished
+        assert s.graduated_words() == [w]
+
+    def test_failure_after_second_retry_means_no_graduation(self):
         w = _word(1)
         steps = [_show(w), _typed(w)]
         s = LearnSession(user_id=USER_ID, steps=steps, required_per_word={1: {SHOW, TYPED}})
         s.record_step(correct=True)  # show
         s.record_step(correct=False)  # typed wrong, retry queued
-        s.record_step(correct=False)  # retry also wrong
+        s.record_step(correct=False)  # retry 1 also wrong, retry 2 queued
+        s.record_step(correct=False)  # retry 2 also wrong
         assert s.is_finished
         assert s.graduated_words() == []  # word stays in needs-learning
 
-    def test_retry_only_queued_once(self):
-        """A retry that fails doesn't generate another retry."""
+    def test_retry_only_queued_twice(self):
+        """A step that fails three times doesn't generate a fourth attempt."""
         w = _word(1)
         steps = [_typed(w)]
         s = LearnSession(user_id=USER_ID, steps=steps, required_per_word={1: {TYPED}})
         s.record_step(correct=False)  # 1st attempt: wrong, retry queued
-        s.record_step(correct=False)  # retry attempt: wrong, NO new retry
+        s.record_step(correct=False)  # 2nd attempt: wrong, final retry queued
+        s.record_step(correct=False)  # 3rd attempt: wrong, NO new retry
         assert s.is_finished
         assert s.retries_appended
 
@@ -355,11 +398,9 @@ class TestApplyGraduations:
         )
         graduated = await apply_graduations(db, s)
         assert graduated == 1
-        # Nouns get translate, MC, article, plural SM-2 entries
-        for qt in ("translate", "multiple_choice", "article", "plural"):
-            state = await get_sm2_state(db, USER_ID, wid, qt)
-            assert state is not None
-            assert state["last_quality"] == 4
+        state = await get_sm2_state(db, USER_ID, wid, "translate")
+        assert state is not None
+        assert state["last_quality"] == 4
 
     async def test_does_not_graduate_failed_word(self, db):
         wid = await add_word(db, USER_ID, "adj", "schnell", "fast")

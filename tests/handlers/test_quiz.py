@@ -71,15 +71,21 @@ class TestRatingKeyboard:
 class TestFormatAnswerResponse:
     def test_correct_format(self):
         question = QuizQuestion(
-            word={"german": "Katze", "translation": "cat", "part_of_speech": "n"},
+            word={
+                "german": "Katze",
+                "translation": "cat",
+                "part_of_speech": "n",
+                "article": "die",
+            },
             quiz_type="translate",
             prompt="p",
             options=None,
             correct_answer="die Katze",
         )
         text = _format_answer_response(question, correct=True)
-        assert "Correct" in text
+        assert "How did it feel?" in text
         assert "die Katze" in text
+        assert "= cat" in text
 
     def test_wrong_format(self):
         question = QuizQuestion(
@@ -90,7 +96,9 @@ class TestFormatAnswerResponse:
             correct_answer="die Katze",
         )
         text = _format_answer_response(question, correct=False)
-        assert "Wrong" in text
+        assert "Not quite" in text
+        assert "Answer:" in text
+        assert "= cat" in text
 
     def test_html_escape(self):
         # Use a value that doesn't collide with the wrapper <b> tag
@@ -426,9 +434,9 @@ class TestQuizConversation:
         result = await quiz_button_answer(upd, fake_context)
         assert result == QUIZ_RATING
         assert fake_context.user_data["last_answer_correct"] is True
-        # Edit text should mention "Correct"
         text = upd.callback_query.edit_message_text.call_args.args[0]
-        assert "Correct" in text
+        assert "die Katze" in text
+        assert "= cat" in text
 
     async def test_button_answer_multiple_choice_wrong(self, fake_update, fake_context, db):
         word = {
@@ -458,7 +466,8 @@ class TestQuizConversation:
         assert result == QUIZ_RATING
         assert fake_context.user_data["last_answer_correct"] is False
         text = upd.callback_query.edit_message_text.call_args.args[0]
-        assert "Wrong" in text
+        assert "Not quite" in text
+        assert "Answer:" in text
 
     async def test_button_answer_article(self, fake_update, fake_context, db):
         word = {

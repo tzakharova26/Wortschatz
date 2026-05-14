@@ -28,10 +28,17 @@ from bot.database import (
     get_learning_overview,
     get_needs_learning_words,
     get_words_by_pos,
+    parse_irregular_forms,
 )
 from bot.logging_config import get_logger, log_user_action, log_user_warning
 from bot.progress import format_quiz_intro
-from bot.quiz import apply_results, build_quiz_session, check_answer, format_summary
+from bot.quiz import (
+    apply_results,
+    build_quiz_session,
+    check_answer,
+    format_summary,
+    german_with_article,
+)
 
 from ._shared import (
     CB_ART,
@@ -50,7 +57,7 @@ QUIZ_SELECTION_POOL_MULTIPLIER = 4
 
 
 def _clear_quiz_state(context: ContextTypes.DEFAULT_TYPE) -> None:
-    for k in ("quiz_session", "quiz_all_words", "last_answer_correct"):
+    for k in ("quiz_session", "quiz_all_words", "last_answer_correct", "quiz_message"):
         context.user_data.pop(k, None)
 
 
@@ -96,7 +103,35 @@ async def _send_question(reply_target, context: ContextTypes.DEFAULT_TYPE) -> No
     total = len(session.questions)
     text = f"<b>Question {idx}/{total}</b>\n{html.escape(q.prompt)}"
 
-    await reply_target.reply_text(text, reply_markup=markup, parse_mode="HTML")
+    await _edit_or_reply_session_message(
+        context,
+        "quiz_message",
+        reply_target,
+        text,
+        reply_markup=markup,
+    )
+
+
+async def _edit_or_reply_session_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    key: str,
+    reply_target,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    """Prefer editing the active bot message; fall back to sending a new one."""
+    message = context.user_data.get(key)
+    editable = message if hasattr(message, "edit_text") else None
+    if editable is not None:
+        try:
+            await editable.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+            return
+        except Exception:
+            log_user_warning(logger, 0, f"Failed to edit {key}; sending a new message")
+
+    sent = await reply_target.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
+    if sent is not None:
+        context.user_data[key] = sent
 
 
 async def quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -163,12 +198,48 @@ async def quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return QUIZ_ANSWERING
 
 
+def _format_word_card(question) -> str:
+    """Compact post-answer card with translation and relevant stored forms."""
+    word = question.word
+    lines = [
+        f"<b>{html.escape(german_with_article(word))}</b>",
+        f"= {html.escape(word['translation'])}",
+    ]
+    if word.get("part_of_speech") == "n":
+        plural = word.get("plural")
+        if plural and plural.strip():
+            lines.append(f"plural: {html.escape(plural)}")
+    elif word.get("part_of_speech") == "v":
+        partizip = word.get("partizip_ii")
+        if partizip and partizip.strip():
+            lines.append(f"Partizip II: {html.escape(partizip)}")
+        forms = parse_irregular_forms(word.get("irregular_forms"))
+        if forms:
+            forms_text = ", ".join(
+                f"{html.escape(k)}: {html.escape(v)}" for k, v in forms.items() if v
+            )
+            if forms_text:
+                lines.append(f"forms: {forms_text}")
+
+    if question.quiz_type == "verb_forms" and question.verb_form_key:
+        lines.append(
+            f"asked: {html.escape(question.verb_form_key)} → "
+            f"{html.escape(question.correct_answer)}"
+        )
+    elif question.quiz_type == "partizip":
+        lines.append(f"asked: Partizip II → {html.escape(question.correct_answer)}")
+    elif question.quiz_type == "plural":
+        lines.append(f"asked: plural → {html.escape(question.correct_answer)}")
+    return "\n".join(lines)
+
+
 def _format_answer_response(question, correct: bool) -> str:
-    """Build the 'Correct!/Wrong' message with HTML-escaped correct answer."""
-    safe_answer = html.escape(question.correct_answer or "")
+    """Build the post-answer card with HTML-escaped correct answer."""
+    card = _format_word_card(question)
     if correct:
-        return f"Correct! The answer is: <b>{safe_answer}</b>"
-    return f"Wrong. The correct answer is: <b>{safe_answer}</b>"
+        return card + "\n\nHow did it feel?"
+    safe_answer = html.escape(question.correct_answer or "")
+    return f"<b>Not quite.</b>\nAnswer: <b>{safe_answer}</b>\n\n{card}\n\nHow did it feel?"
 
 
 async def quiz_text_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -184,10 +255,12 @@ async def quiz_text_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data["last_answer_correct"] = correct
 
     text = _format_answer_response(q, correct)
-    await update.message.reply_text(
+    await _edit_or_reply_session_message(
+        context,
+        "quiz_message",
+        update.message,
         text,
         reply_markup=_rating_keyboard(correct),
-        parse_mode="HTML",
     )
     return QUIZ_RATING
 
@@ -220,6 +293,7 @@ async def quiz_button_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup=_rating_keyboard(correct),
         parse_mode="HTML",
     )
+    context.user_data["quiz_message"] = query.message
     return QUIZ_RATING
 
 
@@ -241,7 +315,6 @@ async def quiz_rating(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         all_words = context.user_data.get("quiz_all_words", [])
         session.add_misspell_question(q.word, all_words)
         session.record_misspell()
-        await query.edit_message_text("Marked as misspell. Word will repeat later.")
     else:
         try:
             quality = int(rate_data)
@@ -250,7 +323,6 @@ async def quiz_rating(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             await query.edit_message_text("Invalid rating.")
             return QUIZ_RATING
         session.record_result(quality, correct)
-        await query.edit_message_text("Noted.")
 
     if session.is_finished:
         return await _finish_quiz(query, context)
@@ -267,7 +339,7 @@ async def _finish_quiz(query, context: ContextTypes.DEFAULT_TYPE) -> int:
     summary = format_summary(session)
     if failures:
         summary += f"\n\n(Note: {failures} result(s) could not be saved due to a database error.)"
-    await query.message.reply_text(summary, parse_mode="HTML")
+    await _edit_or_reply_session_message(context, "quiz_message", query.message, summary)
 
     _clear_quiz_state(context)
     user_id = session.user_id

@@ -5,7 +5,7 @@ A Telegram bot for learning German vocabulary using spaced repetition (SM-2 algo
 
 ## Tech Stack
 - **Language:** Python 3.11+
-- **Telegram library:** python-telegram-bot (v20+, async)
+- **Telegram library:** python-telegram-bot 21.6 (async, with `[job-queue]`)
 - **Database:** SQLite via aiosqlite (async)
 - **Config:** python-dotenv, `.env` file for secrets
 - **Deployment:** Docker on VPS
@@ -17,10 +17,20 @@ Wortschatz/
   bot/
     __init__.py
     main.py            # Entry point, application setup
-    handlers.py        # Telegram command & message handlers
+    handlers/          # Telegram command & conversation handlers
+      add.py
+      learn.py
+      quiz.py
+      reminders.py
+      simple.py
+      parsers.py
+      _shared.py
     database.py        # Database models and queries
     quiz.py            # Quiz logic, question generation (revision flow)
     learn.py           # Learning flow (massed drill for new words, graduation into SM-2)
+    questions.py       # Shared question/answer helpers
+    progress.py        # Learning queue / reminder text formatting
+    reminders.py       # Reminder scheduling and timezone helpers
     sm2.py             # SM-2 spaced repetition algorithm
     stats.py           # Statistics formatting
     umlaut.py          # Umlaut conversion utilities
@@ -30,6 +40,13 @@ Wortschatz/
     __init__.py
     conftest.py        # Shared fixtures (in-memory DB, fake update/context)
     helpers.py         # Test helpers (e.g. graduate_word to seed /quiz pool)
+    handlers/
+      test_add.py
+      test_learn.py
+      test_parsers.py
+      test_quiz.py
+      test_shared.py
+      test_simple.py
     test_database.py
     test_sm2.py
     test_quiz.py
@@ -118,7 +135,7 @@ vi | fahren | ist gefahren | fahre | faehrst | faehrt | to drive
 - `german` and `translation` cannot be empty or whitespace-only
 - All inputs are stripped of leading/trailing whitespace
 - Tags are normalized: whitespace stripped, empty segments removed
-- `quiz_type` must be one of: `translate`, `multiple_choice`, `article`, `verb_forms`
+- `quiz_type` must be one of: `translate`, `multiple_choice`, `article`, `verb_forms`, `plural`, `partizip`
 
 ### Umlaut Handling
 - Store and display proper Unicode (ae->ä, oe->ö, ue->ü, ss->ß where appropriate)
@@ -144,6 +161,7 @@ QUIZ_TEMPERATURE = 0.3
 QUIZ_TYPE_WEIGHTS = {
     "translate": 1.0,
     "verb_forms": 0.9,
+    "partizip": 0.8,
     "multiple_choice": 0.6,
     "article": 0.5,
     "plural": 0.5,
@@ -154,8 +172,9 @@ QUIZ_TYPE_WEIGHTS = {
 1. **translate** -- bot shows translation, user types the German word (all POS). For nouns, user must include article.
 2. **multiple_choice** -- bot shows German word + buttons with translation options; wrong options from same POS, fallback to all vocabulary. Buttons in Telegram.
 3. **article** -- nouns only: bot shows noun without article, user picks der/die/das buttons.
-4. **verb_forms** -- irregular verbs only: bot shows infinitive + which form to type (e.g. "du"), user types the form. Form is randomly picked from stored irregular_forms JSON.
-5. **plural** -- nouns with a non-empty plural only: bot shows article + singular ("die Katze"), user types the plural form ("Katzen"). Typed input with umlaut tolerance.
+4. **partizip** -- verbs with `partizip_ii`: bot shows translation, user types the full stored Partizip II (e.g. "hat gemacht").
+5. **verb_forms** -- irregular verbs only: bot shows infinitive + which form to type (e.g. "du"), user types the form. Form is randomly picked from stored irregular_forms JSON.
+6. **plural** -- nouns with a non-empty plural only: bot shows article + singular ("die Katze"), user types the plural form ("Katzen"). Typed input with umlaut tolerance.
 
 ### Multiple Choice Option Filling
 1. Try same POS words from user's vocabulary (3 wrong options needed)
@@ -190,10 +209,10 @@ The quiz start message explains all five quality levels and the misspell behavio
 
 ### Session Flow
 1. `/quiz` or `/quiz #tag` -> generate QuizSession -> send start message with rating explanation -> send first question
-2. User answers (types text or taps button) -> show result (correct/wrong + correct answer) + rating buttons
-3. User rates -> store rating, advance to next question
+2. User answers (types text or taps button) -> edit the active question into a compact word card with translation, relevant forms, and rating buttons
+3. User rates -> store rating, edit the same bot message into the next question
 4. If "Misspell" tapped -> recalculate quiz type for the word, append new question at end
-5. After last question -> show summary with congrats (e.g., "5/7 correct" + per-word breakdown)
+5. After last question -> edit the active bot message into the summary (e.g., "5/7 correct" + per-word breakdown)
 6. Async bulk-update SM-2 state and quiz_history after session ends
 
 ### Session Data Model
@@ -217,7 +236,8 @@ class QuizSession:
 
 ### SM-2 Spaced Repetition Algorithm
 Full SM-2 implementation:
-- Each word+quiz_type pair has its own SM-2 state (easiness factor, interval, repetitions)
+- Each word has one canonical SM-2 state row with `quiz_type='word'` (easiness factor, interval, repetitions)
+- Quiz types are practice formats selected randomly per word; they do not have separate scheduling state
 - After each answer, SM-2 state updated with the user's self-rated quality (0-5)
 - Words with earliest due date are prioritized for quiz selection
 
@@ -229,11 +249,10 @@ irregular_forms TEXT  -- JSON: {"ich": "fahre", "du": "faehrst", "er": "faehrt"}
 Input format unchanged; positions parsed as ich, du, er by default. JSON storage is extensible for future forms.
 
 ### "Learned" Definition (for stats only)
-A word is considered **learned** when all applicable quiz types have been passed at least **4 times total**:
-- Noun: quizzes 1, 2, 3, 5 (translation, multiple choice, article, plural). Nouns without a plural skip 5.
-- Regular verb: quizzes 1, 2 (translation, multiple choice)
-- Irregular verb: quizzes 1, 2, 4 (translation, multiple choice, verb forms)
-- Adjective/Adverb: quizzes 1, 2 (translation, multiple choice)
+A word is considered **learned** when it graduates from `/learn` into the normal `/quiz` pool.
+Graduation writes `quiz_history.source='learn'` rows for the applicable quiz formats and seeds
+one word-level SM-2 row. If a later `/quiz` rating is `Blackout (0)`, `sm2_state.last_quality=0`
+demotes the word back into `/learn` and it is not counted as currently learned until it graduates again.
 
 ## Commands
 
@@ -246,17 +265,21 @@ A word is considered **learned** when all applicable quiz types have been passed
 | `/tags` | List all existing tags |
 | `/delete <word>` | Delete a word card by its German text (umlaut-aware). Confirms via `/delete_confirm` if multiple matches. |
 | `/quiz [N] [tag]` | Start a quiz: `N` questions (default 7, capped at QUIZ_MAX_SIZE=50), optional tag filter. Args order-independent. If due words < N, the session cycles through them with new quiz types. **Excludes words still in the `/learn` pool.** |
-| `/learn [N] [tag]` | Massed-drill flow for new (or Blackout-flagged) words. Per word: show card → MC → typed → (article + plural for nouns / two verb forms for irregular verbs). Wrong steps retry once at session end; a word graduates only when all required steps pass. Graduation seeds SM-2 with synthetic Good ratings per applicable quiz type. Capped at `LEARN_MAX_SIZE=10`. |
+| `/learn [N] [tag]` | Massed-drill flow for new (or Blackout-flagged) words. Per word: show card → MC → typed → (article + plural for nouns / Partizip II + two verb forms for verbs where applicable). Correct answers advance silently; wrong answers are folded into the next prompt in the same edited bot message. Wrong steps get up to two retries in the same session, without showing the card again; a word graduates only when all required steps pass. Blackout words are tried before new words but use at most 50% of a normal `/learn` session. Graduation seeds word-level SM-2 with synthetic Good ratings and records learn history per applicable quiz type. Capped at `LEARN_MAX_SIZE=10`. |
 | `/stats` | Show learning statistics (today / week / month / overall) |
 | `/remindme HH:MM [tz]` | Add a daily quiz reminder. Default timezone is `Europe/Berlin`. Multiple reminders per user supported. |
 | `/reminders` | List user's reminders with each one's source time and Berlin/Moscow equivalents. |
 | `/remindoff <id\|all>` | Remove a specific reminder (by id) or all of them. |
 
 ## Statistics (`/stats`)
+- Starts with a **Learning queue** block:
+  - Ready to review: due words according to word-level SM-2
+  - Waiting to learn: brand-new or Blackout-demoted words
+  - In rotation: graduated words currently eligible for `/quiz`
 - **Today / This week / This month:**
-  - Quizzes completed
+  - Quizzes completed (`quiz_history.source='quiz'` only; `/learn` does not inflate this count)
   - Words added
-  - Words learned (reached "learned" threshold)
+  - Words learned (graduated from `/learn` in that period)
 - Overall totals
 
 ## Database Schema (SQLite)
@@ -265,7 +288,7 @@ A word is considered **learned** when all applicable quiz types have been passed
 CREATE TABLE words (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
-    part_of_speech TEXT NOT NULL,  -- 'n', 'v', 'adj', 'adv'
+    part_of_speech TEXT NOT NULL,  -- 'n', 'v', 'adj', 'adv', 'prep'
     german TEXT NOT NULL,
     article TEXT,                   -- der/die/das (nouns only)
     plural TEXT,                    -- nouns only
@@ -283,7 +306,7 @@ CREATE TABLE sm2_state (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     word_id INTEGER NOT NULL,
-    quiz_type TEXT NOT NULL,        -- 'translate', 'multiple_choice', 'article', 'verb_forms'
+    quiz_type TEXT NOT NULL,        -- canonical runtime row is 'word'; legacy quiz-type rows may exist
     easiness_factor REAL DEFAULT 2.5,
     interval INTEGER DEFAULT 0,
     repetitions INTEGER DEFAULT 0,
@@ -303,6 +326,7 @@ CREATE TABLE quiz_history (
     word_id INTEGER NOT NULL,
     quiz_type TEXT NOT NULL,
     correct INTEGER NOT NULL,       -- 0 or 1
+    source TEXT NOT NULL DEFAULT 'quiz', -- 'quiz' for reviews, 'learn' for graduations
     answered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (word_id) REFERENCES words(id) ON DELETE CASCADE
 );
@@ -328,7 +352,7 @@ CREATE INDEX idx_reminders_user_id ON reminders(user_id);
 - Daily firing handled by python-telegram-bot's `JobQueue` (requires `[job-queue]` extra → APScheduler)
 - Each job is named `reminder_{id}` so it can be individually cancelled
 - On every bot startup, `load_all_reminders` repopulates the JobQueue from the DB (jobs are in-memory only)
-- Reminder messages: "Time to practice German! Send /quiz to start." Send failures (e.g., user blocked the bot) are caught and logged; the DB row is preserved so reminders resume if the user unblocks.
+- Reminder messages include a short practice prompt plus the learning overview (ready to review, waiting to learn, in rotation) when the DB connection is available. Send failures (e.g., user blocked the bot) are caught and logged; the DB row is preserved so reminders resume if the user unblocks.
 - `/reminders` displays both Berlin and Moscow times for each entry, regardless of source TZ; uses today's date as DST reference
 
 ## Development
@@ -341,10 +365,14 @@ cp .env.example .env  # add BOT_TOKEN
 
 ## Docker
 ```bash
-docker-compose up -d
+docker compose up -d --build bot
 ```
 
-The `data/` directory is mounted as a persistent Docker volume (`bot-data:/app/data`), so the database and log files survive container restarts.
+The container's `/app/data` directory is mounted as the persistent Docker volume `bot-data`, so the SQLite database and log files survive container restarts. The optional read-only DB browser runs with:
+
+```bash
+docker compose --profile tools up -d --build db-browser
+```
 
 ## Logging & Error Handling
 - **Log file:** `data/bot.log` (persisted via Docker volume)

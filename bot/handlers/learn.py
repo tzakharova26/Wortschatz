@@ -44,6 +44,8 @@ logger = get_logger(__name__)
 
 def _clear_learn_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("learn_session", None)
+    context.user_data.pop("learn_message", None)
+    context.user_data.pop("learn_feedback", None)
 
 
 def _build_learn_step_markup(step) -> InlineKeyboardMarkup | None:
@@ -75,12 +77,44 @@ async def _send_learn_step(reply_target, context: ContextTypes.DEFAULT_TYPE) -> 
     # Retries get appended to ``steps`` only at end-of-main-run, but the user
     # should see the counter grow as soon as a wrong answer queues a retry.
     total = len(session.steps) + len(session.retry_queue)
-    retry_tag = " (retry)" if step.is_retry else ""
+    retry_tag = f" (retry {step.attempt - 1}/2)" if step.attempt > 1 else ""
     if step.step_type == learn_core.SHOW:
         text = f"<b>Step {idx}/{total} — see card</b>{retry_tag}\n\n{step.prompt}"
     else:
         text = f"<b>Step {idx}/{total}</b>{retry_tag}\n{html.escape(step.prompt)}"
-    await reply_target.reply_text(text, reply_markup=markup, parse_mode="HTML")
+
+    feedback = context.user_data.pop("learn_feedback", None)
+    if feedback:
+        text = feedback + "\n\n" + text
+    await _edit_or_reply_session_message(
+        context,
+        "learn_message",
+        reply_target,
+        text,
+        reply_markup=markup,
+    )
+
+
+async def _edit_or_reply_session_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    key: str,
+    reply_target,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    """Prefer editing the active bot message; fall back to sending a new one."""
+    message = context.user_data.get(key)
+    editable = message if hasattr(message, "edit_text") else None
+    if editable is not None:
+        try:
+            await editable.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+            return
+        except Exception:
+            log_user_warning(logger, 0, f"Failed to edit {key}; sending a new message")
+
+    sent = await reply_target.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
+    if sent is not None:
+        context.user_data[key] = sent
 
 
 async def _start_learn_session(
@@ -134,7 +168,22 @@ async def learn_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     log_user_action(logger, user_id, f"/learn size={size} tag={_safe_log(tag) if tag else 'all'}")
 
     conn = _get_conn(context)
-    words = await get_needs_learning_words(conn, user_id, limit=size, tag=tag)
+    old_limit = size // 2
+    blackout_words = await get_needs_learning_words(
+        conn,
+        user_id,
+        limit=old_limit,
+        tag=tag,
+        learning_status="blackout",
+    )
+    new_words = await get_needs_learning_words(
+        conn,
+        user_id,
+        limit=size - len(blackout_words),
+        tag=tag,
+        learning_status="new",
+    )
+    words = blackout_words + new_words
     if notice:
         await update.message.reply_text(notice)
     return await _start_learn_session(update, context, user_id, words, update.message)
@@ -183,14 +232,13 @@ async def learn_button_answer(update: Update, context: ContextTypes.DEFAULT_TYPE
         # text (echoing user-rendered HTML back through parse_mode="HTML" is
         # fragile and could amplify any HTML if _show_prompt ever changed).
         session.record_step(correct=True)
-        await _drop_buttons(query, session.user_id)
     elif data.startswith(CB_LEARN_MC) or data.startswith(CB_LEARN_ART):
         prefix = CB_LEARN_MC if data.startswith(CB_LEARN_MC) else CB_LEARN_ART
         user_answer = data.removeprefix(prefix)
         correct = learn_core.check_answer(step, user_answer)
         session.record_step(correct=correct)
-        feedback = _format_learn_feedback(step, correct)
-        await query.edit_message_text(feedback, parse_mode="HTML")
+        if not correct:
+            context.user_data["learn_feedback"] = _format_learn_feedback(step)
     else:
         log_user_warning(logger, session.user_id, f"Unknown learn callback: {data!r}")
         return LEARN_ANSWERING
@@ -203,14 +251,19 @@ async def learn_button_answer(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def learn_text_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles TYPED, VERB_FORM, and PLURAL steps."""
+    """Handles TYPED, PARTIZIP, VERB_FORM, and PLURAL steps."""
     session: learn_core.LearnSession | None = context.user_data.get("learn_session")
     if not session or session.is_finished:
         await update.message.reply_text("No active learning session. Use /learn to start one.")
         return ConversationHandler.END
 
     step = session.current_step
-    if step.step_type not in (learn_core.TYPED, learn_core.VERB_FORM, learn_core.PLURAL):
+    if step.step_type not in (
+        learn_core.TYPED,
+        learn_core.PARTIZIP,
+        learn_core.VERB_FORM,
+        learn_core.PLURAL,
+    ):
         # User typed during a button-only step. Just nudge them.
         await update.message.reply_text("Please use the buttons above.")
         return LEARN_ANSWERING
@@ -218,8 +271,8 @@ async def learn_text_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     user_answer = update.message.text.strip()
     correct = learn_core.check_answer(step, user_answer)
     session.record_step(correct=correct)
-    feedback = _format_learn_feedback(step, correct)
-    await update.message.reply_text(feedback, parse_mode="HTML")
+    if not correct:
+        context.user_data["learn_feedback"] = _format_learn_feedback(step)
 
     if session.is_finished:
         return await _finish_learn(update.message, context)
@@ -228,13 +281,9 @@ async def learn_text_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return LEARN_ANSWERING
 
 
-def _format_learn_feedback(step, correct: bool) -> str:
-    if step.step_type == learn_core.SHOW:
-        return "Got it."
+def _format_learn_feedback(step) -> str:
     safe_answer = html.escape(step.correct_answer or "")
-    if correct:
-        return f"Correct. ({safe_answer})"
-    return f"Wrong. The answer is: <b>{safe_answer}</b>"
+    return f"<b>Try this one again later.</b>\nAnswer: <b>{safe_answer}</b>"
 
 
 async def _finish_learn(reply_target, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -254,7 +303,12 @@ async def _finish_learn(reply_target, context: ContextTypes.DEFAULT_TYPE) -> int
     summary = learn_core.format_summary(session)
     if graduated == -1:
         summary += "\n\n(Note: some graduations could not be saved due to a database error.)"
-    await reply_target.reply_text(summary, parse_mode="HTML")
+    await _edit_or_reply_session_message(
+        context,
+        "learn_message",
+        reply_target,
+        summary,
+    )
     log_user_action(
         logger,
         session.user_id,

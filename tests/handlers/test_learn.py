@@ -2,11 +2,15 @@
 post-/add 'Start learning' button. (Tests for the bot.learn core module live
 in tests/test_learn.py.)"""
 
+from datetime import datetime
+
 from bot.config import LEARN_MIN_SIZE
 from bot.database import (
+    add_quiz_history,
     add_word,
     get_due_words,
     get_needs_learning_words,
+    upsert_sm2_state,
 )
 from bot.handlers import (
     CB_LEARN_BATCH,
@@ -57,6 +61,38 @@ class TestLearnConversation:
         word_ids = {step.word["id"] for step in session.steps}
         assert len(word_ids) == LEARN_MIN_SIZE
 
+    async def test_learn_reserves_at_most_half_for_blackout_words(
+        self, fake_update, fake_context, db
+    ):
+        blackout_ids = []
+        for i in range(5):
+            wid = await add_word(db, 12345, "adj", f"old{i}", f"old trans{i}")
+            await add_quiz_history(db, 12345, wid, "translate", correct=False)
+            await upsert_sm2_state(
+                db,
+                12345,
+                wid,
+                "translate",
+                easiness_factor=1.7,
+                interval=1,
+                repetitions=0,
+                correct_count=0,
+                next_review=datetime.now(),
+                last_quality=0,
+            )
+            blackout_ids.append(wid)
+        new_ids = [await add_word(db, 12345, "adj", f"new{i}", f"new trans{i}") for i in range(5)]
+
+        upd = fake_update()
+        fake_context.args = ["6"]
+        result = await learn_start(upd, fake_context)
+
+        assert result == LEARN_ANSWERING
+        session = fake_context.user_data["learn_session"]
+        word_ids = {step.word["id"] for step in session.steps}
+        assert len(word_ids & set(blackout_ids)) == 3
+        assert len(word_ids & set(new_ids)) == 3
+
     async def test_learn_full_pass_graduates_word_into_quiz_pool(
         self, fake_update, fake_context, db
     ):
@@ -84,7 +120,7 @@ class TestLearnConversation:
         assert [w["id"] for w in due] == [word_id]
 
     async def test_learn_failure_keeps_word_in_pool(self, fake_update, fake_context, db):
-        """A wrong typed answer (twice — main + retry) leaves the word un-graduated."""
+        """A wrong typed answer three times leaves the word un-graduated."""
         word_id = await add_word(db, 12345, "adj", "schnell", "fast")
         await learn_start(fake_update(), fake_context)
         session = fake_context.user_data["learn_session"]
@@ -99,6 +135,8 @@ class TestLearnConversation:
         await learn_text_answer(fake_update(text="wrong-answer"), fake_context)
         # retry typed: still wrong
         await learn_text_answer(fake_update(text="still-wrong"), fake_context)
+        # second retry typed: still wrong
+        await learn_text_answer(fake_update(text="wrong-again"), fake_context)
 
         # Word stays in needs-learning, not in /quiz
         assert (await get_due_words(db, 12345, limit=10)) == []
@@ -262,9 +300,8 @@ class TestLearnConversation:
         upd = fake_update(text=typed_step.correct_answer)
         result = await learn_text_answer(upd, fake_context)
         assert result == ConversationHandler.END
-        # Summary is the LAST reply (after the per-step feedback).
-        last_reply = upd.message.reply_text.call_args_list[-1].args[0]
-        assert "could not be saved" in last_reply
+        summary = fake_context.user_data["learn_message"].edit_text.call_args.args[0]
+        assert "could not be saved" in summary
 
     async def test_expired_pending_learn_ids_refused(
         self, fake_update, fake_context, db, monkeypatch
@@ -305,7 +342,7 @@ class TestLearnConversation:
         # Step 1: SHOW → tap "Got it" (correct). Next render shows step 2 of 3.
         upd_show = fake_update(callback_data="lshow:ok")
         await learn_button_answer(upd_show, fake_context)
-        text_after_show = upd_show.callback_query.message.reply_text.call_args.args[0]
+        text_after_show = fake_context.user_data["learn_message"].edit_text.call_args.args[0]
         assert "Step 2/3" in text_after_show
 
         # Step 2: MC → wrong → counter must show 4 because retry is queued.
@@ -313,10 +350,11 @@ class TestLearnConversation:
         wrong_choice = next(o for o in mc_step.options if o != mc_step.correct_answer)
         upd_mc = fake_update(callback_data=f"lmc:{wrong_choice}")
         await learn_button_answer(upd_mc, fake_context)
-        text_after_wrong = upd_mc.callback_query.message.reply_text.call_args.args[0]
+        text_after_wrong = fake_context.user_data["learn_message"].edit_text.call_args.args[0]
         assert (
             "Step 3/4" in text_after_wrong
         ), f"Counter should grow on wrong answer; got: {text_after_wrong!r}"
+        assert "Try this one again later" in text_after_wrong
 
     async def test_learn_cancel_persists_partial_graduation(self, fake_update, fake_context, db):
         """If a word fully graduated before cancel, its graduation must persist."""

@@ -4,8 +4,8 @@ Distinct from /quiz: each word gets a rapid-fire massed drill — show the card,
 then recognize via multiple choice, then produce via typed answer, then any
 POS-specific extras (article for nouns, two verb forms for irregular verbs).
 
-Wrong steps are appended to a one-time retry queue at the end of the session.
-A word graduates only if every required step (including retries) passes.
+Wrong steps are retried up to two times at the end of the session.
+A word graduates only if every required step passes within those attempts.
 Graduating writes synthetic Good ratings into SM-2 and quiz_history so the
 word becomes eligible for /quiz from then on.
 """
@@ -40,10 +40,12 @@ MC = "multiple_choice"
 TYPED = "typed"
 ARTICLE = "article"
 PLURAL = "plural"
+PARTIZIP = "partizip"
 VERB_FORM = "verb_form"
 
 # Drill this many distinct verb forms (out of ich/du/er) for irregular verbs.
 LEARN_VERB_FORMS_COUNT = 2
+MAX_STEP_ATTEMPTS = 3
 
 
 @dataclass
@@ -54,7 +56,7 @@ class LearnStep:
     options: list[str] | None  # set for MC and ARTICLE
     correct_answer: str | None  # None for SHOW
     verb_form_key: str | None = None
-    is_retry: bool = False
+    attempt: int = 1
 
 
 @dataclass
@@ -82,9 +84,29 @@ class LearnSession:
             return f"{VERB_FORM}:{step.verb_form_key}"
         return step.step_type
 
+    def _queue_retry(self, step: LearnStep) -> None:
+        retry = LearnStep(
+            word=step.word,
+            step_type=step.step_type,
+            prompt=step.prompt,
+            options=step.options,
+            correct_answer=step.correct_answer,
+            verb_form_key=step.verb_form_key,
+            attempt=step.attempt + 1,
+        )
+        if self.retries_appended:
+            self.steps.append(retry)
+        else:
+            self.retry_queue.append(retry)
+
     def record_step(self, correct: bool) -> None:
-        """Record outcome of the current step. Wrong steps (other than retries)
-        are appended to the retry queue and re-tried once at session end."""
+        """Record outcome of the current step.
+
+        Wrong steps are retried up to ``MAX_STEP_ATTEMPTS`` total attempts. The
+        first retry wave is appended after the main run; a failed retry appends
+        its next retry directly to the active session tail, so retry 2 stays in
+        the same /learn session without replaying the card.
+        """
         step = self.current_step
         if step is None:
             log_user_error(logger, self.user_id, "record_step on finished session")
@@ -93,18 +115,8 @@ class LearnSession:
         key = self.step_key(step)
         if correct:
             self.word_step_passed.setdefault(word_id, set()).add(key)
-        elif not step.is_retry:
-            self.retry_queue.append(
-                LearnStep(
-                    word=step.word,
-                    step_type=step.step_type,
-                    prompt=step.prompt,
-                    options=step.options,
-                    correct_answer=step.correct_answer,
-                    verb_form_key=step.verb_form_key,
-                    is_retry=True,
-                )
-            )
+        elif step.attempt < MAX_STEP_ATTEMPTS:
+            self._queue_retry(step)
         self.current_index += 1
         # Append retries once we've finished the main run.
         if self.current_index >= len(self.steps) and not self.retries_appended:
@@ -215,6 +227,16 @@ def _build_plural_step(word: dict) -> LearnStep:
     )
 
 
+def _build_partizip_step(word: dict) -> LearnStep:
+    return LearnStep(
+        word=word,
+        step_type=PARTIZIP,
+        prompt=f"Type the Partizip II for: {word['translation']}",
+        options=None,
+        correct_answer=word["partizip_ii"],
+    )
+
+
 def _build_verb_form_steps(word: dict) -> list[LearnStep]:
     forms = parse_irregular_forms(word.get("irregular_forms")) or {}
     usable = [(k, v) for k, v in forms.items() if v]
@@ -291,6 +313,10 @@ def build_session(user_id: int, words: list[dict], all_words: list[dict]) -> Lea
             if w.get("plural") and w["plural"].strip():
                 word_steps.append(_build_plural_step(w))
                 word_required.add(PLURAL)
+        elif w["part_of_speech"] == "v":
+            if w.get("partizip_ii") and w["partizip_ii"].strip():
+                word_steps.append(_build_partizip_step(w))
+                word_required.add(PARTIZIP)
 
         for vs in _build_verb_form_steps(w):
             word_steps.append(vs)

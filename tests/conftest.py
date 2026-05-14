@@ -48,6 +48,7 @@ class FakeUser:
 class FakeMessage:
     text: str | None = None
     reply_text: AsyncMock = field(default_factory=AsyncMock)
+    edit_text: AsyncMock = field(default_factory=AsyncMock)
 
 
 @dataclass

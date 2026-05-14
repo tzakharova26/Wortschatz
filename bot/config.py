@@ -20,6 +20,7 @@ LEARN_START_MESSAGE = (
 QUIZ_TYPE_WEIGHTS: dict[str, float] = {
     "translate": 1.0,
     "verb_forms": 0.9,
+    "partizip": 0.8,
     "multiple_choice": 0.6,
     "article": 0.5,
     "plural": 0.5,

@@ -184,6 +184,8 @@ def generate_question(
         return _generate_article(word)
     elif quiz_type == "verb_forms":
         return _generate_verb_forms(word)
+    elif quiz_type == "partizip":
+        return _generate_partizip(word)
     elif quiz_type == "plural":
         return _generate_plural(word)
     else:
@@ -294,6 +296,25 @@ def _generate_verb_forms(word: dict) -> QuizQuestion:
     )
 
 
+def _generate_partizip(word: dict) -> QuizQuestion:
+    """Partizip II quiz: show translation, user types full stored Partizip II."""
+    partizip = word.get("partizip_ii")
+    if not partizip or not partizip.strip():
+        log_user_warning(
+            logger,
+            word.get("user_id", 0),
+            f"Partizip quiz for '{word['german']}' without partizip_ii, falling back to translate",
+        )
+        return _generate_translate(word)
+    return QuizQuestion(
+        word=word,
+        quiz_type="partizip",
+        prompt=f"Type the Partizip II for: {word['translation']}",
+        options=None,
+        correct_answer=partizip,
+    )
+
+
 def build_quiz_session(
     user_id: int,
     due_words: list[dict],
@@ -365,6 +386,9 @@ def format_summary(session: QuizSession) -> str:
             answer_safe = html.escape(question.correct_answer)
             form_safe = html.escape(question.verb_form_key)
             lines.append(f"{mark} {german_safe} ({form_safe}) — {answer_safe}")
+        elif question.quiz_type == "partizip":
+            answer_safe = html.escape(question.correct_answer)
+            lines.append(f"{mark} {german_safe} (Partizip II) — {answer_safe}")
         elif question.quiz_type == "plural":
             answer_safe = html.escape(question.correct_answer)
             lines.append(f"{mark} {german_safe} (plural) — {answer_safe}")

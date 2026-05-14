@@ -51,7 +51,7 @@ def _make_word(
 
 def _make_verb(word_id=2, irregular=True):
     forms = {"ich": "fahre", "du": "f\u00e4hrst", "er": "f\u00e4hrt"} if irregular else None
-    return _make_word(
+    word = _make_word(
         word_id=word_id,
         pos="v",
         german="fahren",
@@ -60,6 +60,8 @@ def _make_verb(word_id=2, irregular=True):
         plural=None,
         irregular_forms=forms,
     )
+    word["partizip_ii"] = "ist gefahren"
+    return word
 
 
 def _make_adj(word_id=3):
@@ -104,6 +106,7 @@ class TestConfigConstants:
     def test_quiz_type_weights(self):
         assert QUIZ_TYPE_WEIGHTS["translate"] == 1.0
         assert QUIZ_TYPE_WEIGHTS["verb_forms"] == 0.9
+        assert QUIZ_TYPE_WEIGHTS["partizip"] == 0.8
         assert QUIZ_TYPE_WEIGHTS["multiple_choice"] == 0.6
         assert QUIZ_TYPE_WEIGHTS["article"] == 0.5
 
@@ -161,11 +164,11 @@ class TestSelectQuizType:
         for _ in range(50):
             assert select_quiz_type(word) != "plural"
 
-    def test_regular_verb_no_verb_forms(self):
+    def test_regular_verb_has_partizip_but_no_verb_forms(self):
         word = _make_verb(irregular=False)
-        for _ in range(50):
-            qt = select_quiz_type(word)
-            assert qt in ("translate", "multiple_choice")
+        types_seen = {select_quiz_type(word) for _ in range(100)}
+        assert types_seen <= {"translate", "multiple_choice", "partizip"}
+        assert "partizip" in types_seen
 
     def test_irregular_verb_can_get_verb_forms(self):
         word = _make_verb(irregular=True)
@@ -173,6 +176,7 @@ class TestSelectQuizType:
         for _ in range(100):
             types_seen.add(select_quiz_type(word))
         assert "verb_forms" in types_seen
+        assert "partizip" in types_seen
 
     def test_adjective_types(self):
         word = _make_adj()
@@ -366,6 +370,20 @@ class TestGenerateQuestion:
         word["irregular_forms"] = json.dumps({"ich": ""})
         q = generate_question(word, "verb_forms", [word])
         assert q.quiz_type == "translate"  # empty form value
+
+    def test_partizip_quiz(self):
+        word = _make_verb(irregular=False)
+        q = generate_question(word, "partizip", [word])
+        assert q.quiz_type == "partizip"
+        assert q.options is None
+        assert q.correct_answer == "ist gefahren"
+        assert "Partizip II" in q.prompt
+
+    def test_partizip_quiz_no_partizip_falls_back(self):
+        word = _make_verb(irregular=False)
+        word["partizip_ii"] = None
+        q = generate_question(word, "partizip", [word])
+        assert q.quiz_type == "translate"
 
     def test_unknown_quiz_type_falls_back(self):
         word = _make_word()

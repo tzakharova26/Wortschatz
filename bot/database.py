@@ -71,7 +71,14 @@ CREATE INDEX IF NOT EXISTS idx_reminders_user_id ON reminders(user_id);
 """
 
 VALID_PARTS_OF_SPEECH = {"n", "v", "adj", "adv", "prep"}
-VALID_QUIZ_TYPES = {"translate", "multiple_choice", "article", "verb_forms", "plural"}
+VALID_QUIZ_TYPES = {
+    "translate",
+    "multiple_choice",
+    "article",
+    "verb_forms",
+    "plural",
+    "partizip",
+}
 WORD_REVIEW_STATE = "word"
 VALID_SM2_TYPES = VALID_QUIZ_TYPES | {WORD_REVIEW_STATE}
 
@@ -89,6 +96,7 @@ APPLICABLE_QUIZ_TYPES: dict[str, list[str]] = {
 # Irregular verbs (those with ich/du/er forms) also get "verb_forms"
 VERB_FORMS_QUIZ = "verb_forms"
 PLURAL_QUIZ = "plural"
+PARTIZIP_QUIZ = "partizip"
 
 
 def get_quiz_types_for_word(word: dict) -> list[str]:
@@ -96,6 +104,9 @@ def get_quiz_types_for_word(word: dict) -> list[str]:
     pos = word["part_of_speech"]
     types = list(APPLICABLE_QUIZ_TYPES.get(pos, ["translate", "multiple_choice"]))
     if pos == "v":
+        partizip = word.get("partizip_ii")
+        if partizip and partizip.strip():
+            types.append(PARTIZIP_QUIZ)
         forms = parse_irregular_forms(word.get("irregular_forms"))
         if forms:
             types.append(VERB_FORMS_QUIZ)
@@ -574,12 +585,16 @@ async def get_needs_learning_words(
     limit: int | None = None,
     tag: str | None = None,
     word_ids: list[int] | None = None,
+    learning_status: str | None = None,
 ) -> list[dict]:
     """Words eligible for /learn: never quizzed yet, or any SM-2 row has last_quality=0
     (Blackout demotes a word back into the learning pool).
 
     Most-recently-added first.
     """
+    if learning_status not in {None, "new", "blackout"}:
+        raise ValueError(f"Invalid learning_status: {learning_status!r}")
+
     where = ["w.user_id = ?", _NEEDS_LEARNING_CLAUSE]
     params: list = [user_id]
 
@@ -592,6 +607,33 @@ async def get_needs_learning_words(
         placeholders = ",".join("?" for _ in word_ids)
         where.append(f"w.id IN ({placeholders})")
         params.extend(word_ids)
+
+    if learning_status == "new":
+        where.append(
+            """NOT EXISTS (
+              SELECT 1 FROM quiz_history hn
+              WHERE hn.word_id = w.id AND hn.user_id = w.user_id
+            )"""
+        )
+        where.append(
+            """NOT EXISTS (
+              SELECT 1 FROM sm2_state sn
+              WHERE sn.word_id = w.id
+                AND sn.user_id = w.user_id
+                AND sn.quiz_type = 'word'
+                AND sn.last_quality = 0
+            )"""
+        )
+    elif learning_status == "blackout":
+        where.append(
+            """EXISTS (
+              SELECT 1 FROM sm2_state sb
+              WHERE sb.word_id = w.id
+                AND sb.user_id = w.user_id
+                AND sb.quiz_type = 'word'
+                AND sb.last_quality = 0
+            )"""
+        )
 
     # The interpolated pieces (where clauses + IN-placeholders) are constants /
     # `?` placeholders only, no user-supplied SQL. S608 is a false positive here.

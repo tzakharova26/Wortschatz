@@ -263,14 +263,19 @@ class TestQuizTypesForWord:
         assert get_quiz_types_for_word(word) == ["translate", "multiple_choice", "article"]
 
     def test_regular_verb(self):
-        word = {"part_of_speech": "v", "irregular_forms": None}
-        assert get_quiz_types_for_word(word) == ["translate", "multiple_choice"]
+        word = {"part_of_speech": "v", "irregular_forms": None, "partizip_ii": "hat gemacht"}
+        assert get_quiz_types_for_word(word) == ["translate", "multiple_choice", "partizip"]
 
     def test_irregular_verb(self):
-        word = {"part_of_speech": "v", "irregular_forms": '{"ich": "fahre"}'}
+        word = {
+            "part_of_speech": "v",
+            "irregular_forms": '{"ich": "fahre"}',
+            "partizip_ii": "ist gefahren",
+        }
         assert get_quiz_types_for_word(word) == [
             "translate",
             "multiple_choice",
+            "partizip",
             "verb_forms",
         ]
 
@@ -279,11 +284,11 @@ class TestQuizTypesForWord:
         assert get_quiz_types_for_word(word) == ["translate", "multiple_choice"]
 
     def test_verb_with_empty_json_forms(self):
-        word = {"part_of_speech": "v", "irregular_forms": "{}"}
+        word = {"part_of_speech": "v", "irregular_forms": "{}", "partizip_ii": None}
         assert get_quiz_types_for_word(word) == ["translate", "multiple_choice"]
 
     def test_verb_with_invalid_json_forms(self):
-        word = {"part_of_speech": "v", "irregular_forms": "not json"}
+        word = {"part_of_speech": "v", "irregular_forms": "not json", "partizip_ii": None}
         assert get_quiz_types_for_word(word) == ["translate", "multiple_choice"]
 
 
