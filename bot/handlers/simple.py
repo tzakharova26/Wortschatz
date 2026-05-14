@@ -24,7 +24,7 @@ from bot.i18n import (
     t,
 )
 from bot.logging_config import get_logger, log_user_action, log_user_error
-from bot.stats import get_user_stats
+from bot.stats import build_stats_chart_file, get_user_stats
 
 from ._shared import (
     CB_HELP,
@@ -277,6 +277,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     lang = await _get_lang(context, user_id)
     text = await get_user_stats(conn, user_id, lang=lang)
     await update.message.reply_text(text, parse_mode="HTML")
+    chart = await build_stats_chart_file(conn, user_id, lang=lang)
+    caption = "График активности" if lang == "ru" else "Activity chart"
+    await update.message.reply_photo(photo=chart, caption=caption)
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

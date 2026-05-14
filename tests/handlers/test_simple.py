@@ -326,4 +326,6 @@ class TestStatsCommand:
         text = upd.message.reply_text.call_args.args[0]
         assert "Statistics" in text
         assert "Today" in text
-        assert "Overall" in text
+        assert "This week" in text
+        assert "Overall" not in text
+        upd.message.reply_photo.assert_awaited_once()

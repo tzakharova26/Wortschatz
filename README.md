@@ -80,13 +80,15 @@ After each answer, the bot shows a compact word card with the translation and re
 
 ### Track Progress
 
-`/stats` starts with the current learning queue:
+`/stats` sends a short text summary with only today and week counts for completed quizzes, added words, and learned words. `/learn` sessions are not counted as completed quizzes.
 
-- words ready to review,
-- words waiting to learn,
-- words already in review rotation.
+The command also sends an activity chart as an inline PNG picture with three views:
 
-Then it shows today, week, month, and overall counts for completed quizzes, added words, and learned words. `/learn` sessions are not counted as completed quizzes.
+- last 7 days,
+- last 30 days,
+- last 12 months.
+
+The chart shows quizzes, learned words, added words, and the current review streak.
 
 ## Commands
 
@@ -97,7 +99,7 @@ Then it shows today, week, month, and overall counts for completed quizzes, adde
 | `/add [tag]` | Add a batch of word cards |
 | `/learn [N] [tag]` | Learn new or Blackout words |
 | `/quiz [N] [tag]` | Review due words |
-| `/stats` | Show learning statistics |
+| `/stats` | Show today/week text stats and send a PNG activity chart |
 | `/language [en\|ru]` | Choose English or Russian interface |
 | `/list <tag>` | List words by tag |
 | `/tags` | Show all tags |
@@ -157,6 +159,7 @@ Current limits:
 - python-telegram-bot, async handlers and JobQueue
 - SQLite with aiosqlite
 - SM-2 spaced repetition implemented in the app
+- Pillow for generated stats chart images
 - Docker Compose deployment
 - pytest and pytest-asyncio
 - ruff for linting and formatting
@@ -269,4 +272,5 @@ The test suite uses in-memory SQLite fixtures for most database coverage. Docker
 - [ ] AI-assisted context sentences
 - [ ] Grammar hints for cards
 - [ ] Smarter typo correction explanations
+- [x] PNG activity chart attached to `/stats`
 - [ ] Richer progress visualizations

@@ -7,6 +7,7 @@ A Telegram bot for learning German vocabulary using spaced repetition (SM-2 algo
 - **Language:** Python 3.11+
 - **Telegram library:** python-telegram-bot 21.6 (async, with `[job-queue]`)
 - **Database:** SQLite via aiosqlite (async)
+- **Images:** Pillow for generated `/stats` chart PNGs
 - **Config:** python-dotenv, `.env` file for secrets
 - **Deployment:** Docker on VPS
 - **Venv:** always use `.venv` in project root
@@ -277,22 +278,25 @@ demotes the word back into `/learn` and it is not counted as currently learned u
 | `/delete <word>` | Delete a word card by its German text (umlaut-aware). Confirms via `/delete_confirm` if multiple matches. |
 | `/quiz [N] [tag]` | Start a quiz: `N` questions (default 7, capped at QUIZ_MAX_SIZE=50), optional tag filter. Args order-independent. If due words < N, the session cycles through them with new quiz types. **Excludes words still in the `/learn` pool.** |
 | `/learn [N] [tag]` | Massed-drill flow for new (or Blackout-flagged) words. Per word: show card → MC → typed → (article + plural for nouns / Partizip II + two verb forms for verbs where applicable). Correct answers advance silently; wrong answers are folded into the next prompt in the same edited bot message. Wrong steps get up to two retries in the same session, without showing the card again; a word graduates only when all required steps pass. Blackout words are tried before new words but use at most 50% of a normal `/learn` session. Graduation seeds word-level SM-2 with synthetic Good ratings and records learn history per applicable quiz type. Capped at `LEARN_MAX_SIZE=20`. |
-| `/stats` | Show learning statistics (today / week / month / overall) |
+| `/stats` | Show short text stats (today/week) and send an activity chart image |
 | `/remindme HH:MM [tz]` | Add a daily quiz reminder. Default timezone is `Europe/Berlin`. Multiple reminders per user supported. |
 | `/reminders` | List user's reminders with each one's source time and Berlin/Moscow equivalents. |
 | `/remindoff <id\|all>` | Remove a specific reminder (by id) or all of them. |
 | `/contact` | Show owner contact info and allow an anonymous letter to be sent to `OWNER_USER_ID`. |
 
 ## Statistics (`/stats`)
-- Starts with a **Learning queue** block:
-  - Ready to review: due words according to word-level SM-2
-  - Waiting to learn: brand-new or Blackout-demoted words
-  - In rotation: graduated words currently eligible for `/quiz`
-- **Today / This week / This month:**
+- Text message includes only:
+  - Today
+  - This week / last 7 days
+- Each text period includes:
   - Quizzes completed (`quiz_history.source='quiz'` only; `/learn` does not inflate this count)
   - Words added
   - Words learned (graduated from `/learn` in that period)
-- Overall totals
+- Sends a generated PNG activity chart as a Telegram photo after the text summary:
+  - last 7 days, last 30 days, and last 12 months
+  - stacked bars for quizzes, learned words, and added words
+  - current review streak
+  - generated in-process with Pillow
 
 ## Safety Limits
 Configured in `bot/config.py` and enforced before writes where applicable:
@@ -489,8 +493,8 @@ docker compose --profile tools up -d --build db-browser
   - Bilingual `/start` language choice with persisted per-user language preference
   - `/language [en|ru]` command and language buttons
   - UTF-8 translations remain fully supported
-- [ ] Visual statistics:
-  - Add chart/image generation for `/stats` or a dedicated stats command
-  - Show last week, month, and year activity plots: quizzes completed, words learned, words added, correct/wrong distribution, and review streak
-  - Prefer generated PNG charts sent by Telegram; keep textual stats as fallback
+- [x] Visual statistics:
+  - `/stats` sends a generated PNG activity chart after the text summary
+  - Shows last week, month, and year activity: quizzes completed, words learned, words added, and review streak
+  - Textual stats now stay short: today and week only
 - [ ] AI-powered features (context sentences, grammar tips, smart corrections)
