@@ -10,7 +10,7 @@ LIST_MAX_WORDS = 40
 # Floor exists so a single session has enough words to interleave meaningfully —
 # below ~5 words the round-robin shuffle degenerates into a near-fixed sequence.
 LEARN_MIN_SIZE = 5
-LEARN_MAX_SIZE = 20
+LEARN_MAX_SIZE = 10
 
 # Safety limits for a small VPS/pet-project deployment.
 MAX_USERS = 10

@@ -12,6 +12,7 @@ from bot.handlers import (
     delete_command,
     delete_confirm_command,
     error_handler,
+    health_command,
     help_callback,
     help_command,
     language_callback,
@@ -34,7 +35,17 @@ class TestConstants:
         assert "Cancel" in ADD_FORMAT_MESSAGE
 
     def test_start_message_has_all_commands(self):
-        for cmd in ("/add", "/list", "/tags", "/delete", "/quiz", "/stats", "/help", "/contact"):
+        for cmd in (
+            "/add",
+            "/list",
+            "/tags",
+            "/delete",
+            "/quiz",
+            "/stats",
+            "/health",
+            "/help",
+            "/contact",
+        ):
             assert cmd in START_MESSAGE
         # Should also explain rating buttons (via QUIZ_START_MESSAGE)
         assert "Misspell" in START_MESSAGE
@@ -329,3 +340,36 @@ class TestStatsCommand:
         assert "This week" in text
         assert "Overall" not in text
         upd.message.reply_photo.assert_awaited_once()
+
+
+class TestHealthCommand:
+    async def test_health_requires_owner_config(self, fake_update, fake_context, monkeypatch):
+        monkeypatch.delenv("OWNER_USER_ID", raising=False)
+        upd = fake_update()
+
+        await health_command(upd, fake_context)
+
+        text = upd.message.reply_text.call_args.args[0]
+        assert "OWNER_USER_ID" in text
+
+    async def test_health_rejects_non_owner(self, fake_update, fake_context, monkeypatch):
+        monkeypatch.setenv("OWNER_USER_ID", "777")
+        upd = fake_update(user_id=12345)
+
+        await health_command(upd, fake_context)
+
+        text = upd.message.reply_text.call_args.args[0]
+        assert "owner" in text.lower()
+
+    async def test_health_owner_gets_snapshot(self, fake_update, fake_context, db, monkeypatch):
+        monkeypatch.setenv("OWNER_USER_ID", "12345")
+        await add_word(db, 12345, "adj", "schnell", "fast")
+        upd = fake_update(user_id=12345)
+
+        await health_command(upd, fake_context)
+
+        text = upd.message.reply_text.call_args.args[0]
+        assert "Bot health" in text
+        assert "Users:" in text
+        assert "Words:" in text
+        assert "Learning queue:" in text

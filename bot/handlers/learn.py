@@ -43,11 +43,13 @@ from ._shared import (
 )
 
 logger = get_logger(__name__)
+LEARN_STEPS_PER_MESSAGE = 5
 
 
 def _clear_learn_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("learn_session", None)
     context.user_data.pop("learn_message", None)
+    context.user_data.pop("learn_message_text", None)
     context.user_data.pop("learn_feedback", None)
 
 
@@ -104,12 +106,14 @@ async def _send_learn_step(reply_target, context: ContextTypes.DEFAULT_TYPE) -> 
     feedback = context.user_data.pop("learn_feedback", None)
     if feedback:
         text = feedback + "\n\n" + text
+    force_new_message = idx > 1 and (idx - 1) % LEARN_STEPS_PER_MESSAGE == 0
     await _edit_or_reply_session_message(
         context,
         "learn_message",
         reply_target,
         text,
         reply_markup=markup,
+        force_new=force_new_message,
     )
 
 
@@ -119,20 +123,40 @@ async def _edit_or_reply_session_message(
     reply_target,
     text: str,
     reply_markup: InlineKeyboardMarkup | None = None,
+    force_new: bool = False,
 ) -> None:
     """Prefer editing the active bot message; fall back to sending a new one."""
     message = context.user_data.get(key)
     editable = message if hasattr(message, "edit_text") else None
-    if editable is not None:
+    if editable is not None and not force_new:
         try:
             await editable.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+            context.user_data[f"{key}_text"] = text
             return
         except Exception:
             log_user_warning(logger, 0, f"Failed to edit {key}; sending a new message")
+    elif editable is not None and force_new:
+        await _clear_previous_learn_buttons(context, key, editable)
 
     sent = await reply_target.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
     if sent is not None:
         context.user_data[key] = sent
+    context.user_data[f"{key}_text"] = text
+
+
+async def _clear_previous_learn_buttons(
+    context: ContextTypes.DEFAULT_TYPE,
+    key: str,
+    editable,
+) -> None:
+    """Before opening a new step message, remove buttons from the previous one."""
+    previous_text = context.user_data.get(f"{key}_text")
+    if not previous_text:
+        return
+    try:
+        await editable.edit_text(previous_text, parse_mode="HTML")
+    except Exception:
+        log_user_warning(logger, 0, f"Failed to clear buttons on old {key}")
 
 
 async def _start_learn_session(

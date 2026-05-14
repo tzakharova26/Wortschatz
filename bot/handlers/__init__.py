@@ -9,7 +9,8 @@ Submodule layout:
 - ``add``       — /add conversation, including the post-/add "Start learning" button payload
 - ``quiz``      — /quiz conversation (revision)
 - ``learn``     — /learn conversation (acquisition)
-- ``simple``    — /start, /help, /list, /tags, /delete, /delete_confirm, /stats, error_handler
+- ``simple``    — /start, /help, /list, /tags, /delete, /delete_confirm,
+                  /stats, /health, error_handler
 - ``reminders`` — /remindme, /reminders, /remindoff
 - ``parsers``   — pure-function /add line parsers
 - ``_shared``   — cross-flow helpers, callback-data prefixes, conversation state numbers
@@ -116,6 +117,7 @@ from .simple import (
     delete_command,
     delete_confirm_command,
     error_handler,
+    health_command,
     help_callback,
     help_command,
     language_callback,
@@ -181,6 +183,7 @@ __all__ = [
     "delete_command",
     "delete_confirm_command",
     "error_handler",
+    "health_command",
     "help_callback",
     "help_command",
     "language_callback",

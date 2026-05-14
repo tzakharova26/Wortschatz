@@ -8,6 +8,7 @@ A Telegram bot for learning German vocabulary using spaced repetition (SM-2 algo
 - **Telegram library:** python-telegram-bot 21.6 (async, with `[job-queue]`)
 - **Database:** SQLite via aiosqlite (async)
 - **Images:** Pillow for generated `/stats` chart PNGs
+- **Monitoring:** owner-only `/health`; optional Prometheus exporter + Prometheus + Grafana Docker profile
 - **Config:** python-dotenv, `.env` file for secrets
 - **Deployment:** Docker on VPS
 - **Venv:** always use `.venv` in project root
@@ -32,6 +33,8 @@ Wortschatz/
     learn.py           # Learning flow (massed drill for new words, graduation into SM-2)
     questions.py       # Shared question/answer helpers
     progress.py        # Learning queue / reminder text formatting
+    health.py          # Owner-only health snapshot and formatting
+    monitoring_exporter.py # Optional Prometheus metrics exporter
     reminders.py       # Reminder scheduling and timezone helpers
     safety.py          # Safety limits and graceful rejection helpers
     sm2.py             # SM-2 spaced repetition algorithm
@@ -81,6 +84,7 @@ Wortschatz/
 - Russian and other UTF-8 translations are fully supported
 - If a user action hits a configured safety bound, the bot must not partially write data. It should stop the operation, show a clear explanation, and log a `WARNING` with `user_id`.
 - Owner contact is configured with `OWNER_TG_NICKNAME` and `OWNER_USER_ID`. Anonymous letters to the owner must not include sender info in the forwarded message.
+- `/health` is owner-only and uses `OWNER_USER_ID` for access control.
 
 ## Word Card Model
 
@@ -277,8 +281,9 @@ demotes the word back into `/learn` and it is not counted as currently learned u
 | `/tags` | List all existing tags |
 | `/delete <word>` | Delete a word card by its German text (umlaut-aware). Confirms via `/delete_confirm` if multiple matches. |
 | `/quiz [N] [tag]` | Start a quiz: `N` questions (default 7, capped at QUIZ_MAX_SIZE=50), optional tag filter. Args order-independent. If due words < N, the session cycles through them with new quiz types. **Excludes words still in the `/learn` pool.** |
-| `/learn [N] [tag]` | Massed-drill flow for new (or Blackout-flagged) words. Per word: show card → MC → typed → (article + plural for nouns / Partizip II + two verb forms for verbs where applicable). Correct answers advance silently; wrong answers are folded into the next prompt in the same edited bot message. Wrong steps get up to two retries in the same session, without showing the card again; a word graduates only when all required steps pass. Blackout words are tried before new words but use at most 50% of a normal `/learn` session. Graduation seeds word-level SM-2 with synthetic Good ratings and records learn history per applicable quiz type. Capped at `LEARN_MAX_SIZE=20`. |
+| `/learn [N] [tag]` | Massed-drill flow for new (or Blackout-flagged) words. Per word: show card → MC → typed → (article + plural for nouns / Partizip II + two verb forms for verbs where applicable). Correct answers advance silently; wrong answers are folded into the next prompt in the same edited bot message. A fresh step message is started every 5 steps so Telegram messages do not become too tall. Wrong steps get up to two retries in the same session, without showing the card again; a word graduates only when all required steps pass. Blackout words are tried before new words but use at most 50% of a normal `/learn` session. Graduation seeds word-level SM-2 with synthetic Good ratings and records learn history per applicable quiz type. Capped at `LEARN_MAX_SIZE=10`. |
 | `/stats` | Show short text stats (today/week) and send an activity chart image |
+| `/health` | Owner-only bot health snapshot: limits, queue counts, DB size, log warnings/errors, and last activity |
 | `/remindme HH:MM [tz]` | Add a daily quiz reminder. Default timezone is `Europe/Berlin`. Multiple reminders per user supported. |
 | `/reminders` | List user's reminders with each one's source time and Berlin/Moscow equivalents. |
 | `/remindoff <id\|all>` | Remove a specific reminder (by id) or all of them. |
@@ -298,6 +303,24 @@ demotes the word back into `/learn` and it is not counted as currently learned u
   - current review streak
   - generated in-process with Pillow
 
+## Monitoring
+- `/health` is the lightweight operational check inside Telegram. It is available only to `OWNER_USER_ID`.
+- `/health` reports:
+  - status (`OK`, `Warning`, or `Critical`)
+  - known users vs `MAX_USERS`
+  - total words and max words for one user vs `MAX_WORDS_PER_USER`
+  - `/learn` queue, due review words, and review rotation count
+  - active reminders
+  - SQLite DB size vs `DB_SIZE_WARNING_MB` and `DB_SIZE_HARD_LIMIT_MB`
+  - today's WARNING/ERROR log counts
+  - last quiz and learn timestamps
+- Optional web monitoring runs under Docker profile `monitoring`:
+  - `metrics-exporter`: `python -m bot.monitoring_exporter`, read-only access to `bot-data`, exposes aggregate Prometheus metrics on `127.0.0.1:9108`
+  - `prometheus`: stores time-series metrics on `127.0.0.1:9090`
+  - `grafana`: web dashboards on `127.0.0.1:${GRAFANA_HOST_PORT:-3001}`, with Prometheus datasource provisioned
+- Keep monitoring ports bound to localhost on VPS and access them via SSH tunnel.
+- Exporter metrics must stay aggregate and must not expose Telegram user ids or message content.
+
 ## Safety Limits
 Configured in `bot/config.py` and enforced before writes where applicable:
 
@@ -313,7 +336,7 @@ Configured in `bot/config.py` and enforced before writes where applicable:
 | `MAX_TAGS_PER_USER` | 100 | New tag creation is rejected when the user already has 100 tags |
 | `MAX_TAG_LENGTH` | 32 chars | Too-long tags are rejected |
 | `MAX_REMINDERS_PER_USER` | 10 | Extra reminders are rejected before DB insert |
-| `LEARN_MAX_SIZE` | 20 | `/learn` request size is capped |
+| `LEARN_MAX_SIZE` | 10 | `/learn` request size is capped |
 | `QUIZ_MAX_SIZE` | 50 | `/quiz` request size is capped |
 | `MAX_QUIZ_SESSION_MULTIPLIER` | 2 | Misspell repeats cannot grow a quiz above twice its initial length |
 | `MAX_OWNER_MESSAGE_CHARS` | 2000 | Anonymous owner letters longer than this are rejected |
@@ -437,6 +460,11 @@ The container's `/app/data` directory is mounted as the persistent Docker volume
 
 ```bash
 docker compose --profile tools up -d --build db-browser
+```
+
+Optional web monitoring:
+```bash
+docker compose --profile monitoring up -d --build metrics-exporter prometheus grafana
 ```
 
 ## Logging & Error Handling

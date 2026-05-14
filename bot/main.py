@@ -14,6 +14,7 @@ from bot.handlers import (
     get_contact_conversation,
     get_learn_conversation,
     get_quiz_conversation,
+    health_command,
     help_callback,
     help_command,
     language_callback,
@@ -79,6 +80,7 @@ def main() -> None:
     app.add_handler(CommandHandler("delete", delete_command))
     app.add_handler(CommandHandler("delete_confirm", delete_confirm_command))
     app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("health", health_command))
     app.add_handler(CommandHandler("remindme", remindme_command))
     app.add_handler(CommandHandler("reminders", reminders_command))
     app.add_handler(CommandHandler("remindoff", remindoff_command))

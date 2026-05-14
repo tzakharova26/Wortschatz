@@ -7,7 +7,7 @@ import html
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from bot.config import LIST_MAX_WORDS
+from bot.config import LIST_MAX_WORDS, get_owner_user_id
 from bot.database import (
     delete_word,
     find_words_by_german,
@@ -15,6 +15,7 @@ from bot.database import (
     get_words,
     set_user_language,
 )
+from bot.health import collect_health_snapshot, format_health_snapshot
 from bot.i18n import (
     SUPPORTED_LANGUAGES,
     add_format_message,
@@ -280,6 +281,40 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     chart = await build_stats_chart_file(conn, user_id, lang=lang)
     caption = "График активности" if lang == "ru" else "Activity chart"
     await update.message.reply_photo(photo=chart, caption=caption)
+
+
+async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    log_user_action(logger, user_id, "/health")
+    lang = await _get_lang(context, user_id)
+    owner_id = get_owner_user_id()
+    if owner_id is None:
+        logger.warning(
+            "Health command refused: OWNER_USER_ID missing/invalid",
+            extra={"user_id": user_id},
+        )
+        text = (
+            "Команда /health доступна только владельцу, но OWNER_USER_ID не настроен."
+            if lang == "ru"
+            else "/health is owner-only, but OWNER_USER_ID is not configured."
+        )
+        await update.message.reply_text(text)
+        return
+    if user_id != owner_id:
+        logger.warning(
+            "Health command refused: user is not owner",
+            extra={"user_id": user_id},
+        )
+        text = (
+            "Команда /health доступна только владельцу."
+            if lang == "ru"
+            else "/health is available only to the owner."
+        )
+        await update.message.reply_text(text)
+        return
+
+    snapshot = await collect_health_snapshot(_get_conn(context), owner_id)
+    await update.message.reply_text(format_health_snapshot(snapshot, lang), parse_mode="HTML")
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -19,6 +19,7 @@ The bot focuses on the parts of German that are easy to forget in a plain word l
 - Lets users contact the owner directly or send an anonymous letter through the bot.
 - Supports English and Russian interface language per user.
 - Provides a read-only SQLite web UI for inspecting the database.
+- Provides owner-only `/health` checks and an optional Prometheus/Grafana monitoring profile.
 
 ## Interface Language
 
@@ -62,6 +63,7 @@ Tags can be attached to batches and later used for filtered lists, learning, and
 - For verbs: Partizip II, and irregular forms when available.
 
 Correct answers advance silently, so the chat stays clean. Wrong answers are folded into the next prompt and retried later in the same session. A failed step can be retried twice, for three total attempts. A word graduates only when all required steps pass.
+To keep Telegram readable, the bot edits the current step message for a short block of steps, then starts a fresh step message every 5 steps.
 
 Blackout-rated words from `/quiz` return to `/learn`. In a normal learning session, Blackout words are tried before brand-new words, but they use at most half of the session.
 
@@ -90,6 +92,23 @@ The command also sends an activity chart as an inline PNG picture with three vie
 
 The chart shows quizzes, learned words, added words, and the current review streak.
 
+### Monitor Health
+
+`/health` is an owner-only command controlled by `OWNER_USER_ID`. It gives a compact Telegram status report:
+
+- users and word counts against configured limits,
+- learning queue, due review, and review rotation counts,
+- active reminders,
+- SQLite database size against warning/hard limits,
+- warning/error log counts for today,
+- last quiz and learn activity.
+
+For deeper web monitoring, the optional Docker `monitoring` profile starts:
+
+- a small read-only Prometheus exporter for aggregate bot metrics,
+- Prometheus for time-series storage,
+- Grafana for dashboards and ad-hoc charts.
+
 ## Commands
 
 | Command | Description |
@@ -100,6 +119,7 @@ The chart shows quizzes, learned words, added words, and the current review stre
 | `/learn [N] [tag]` | Learn new or Blackout words |
 | `/quiz [N] [tag]` | Review due words |
 | `/stats` | Show today/week text stats and send a PNG activity chart |
+| `/health` | Show owner-only bot health |
 | `/language [en\|ru]` | Choose English or Russian interface |
 | `/list <tag>` | List words by tag |
 | `/tags` | Show all tags |
@@ -147,7 +167,7 @@ Current limits:
 - 100 tags per user
 - 32 characters per tag
 - 10 reminders per user
-- `/learn` capped at 20 words
+- `/learn` capped at 10 words
 - `/quiz` capped at 50 questions
 - misspell repeats capped at twice the initial quiz length
 - database size warning at 100 MB, hard write stop at 500 MB
@@ -160,6 +180,7 @@ Current limits:
 - SQLite with aiosqlite
 - SM-2 spaced repetition implemented in the app
 - Pillow for generated stats chart images
+- prometheus-client for the optional metrics exporter
 - Docker Compose deployment
 - pytest and pytest-asyncio
 - ruff for linting and formatting
@@ -179,6 +200,8 @@ bot/
   i18n.py              English/Russian interface text and language helpers
   reminders.py         reminder scheduling
   handlers/contact.py  owner contact and anonymous letter flow
+  health.py            owner-only health snapshot formatting
+  monitoring_exporter.py optional Prometheus metrics exporter
   stats.py             stats formatting
   umlaut.py            umlaut-aware matching utilities
 tests/
@@ -207,6 +230,7 @@ OWNER_USER_ID=123456789
 ```
 
 `OWNER_TG_NICKNAME` is shown to users for direct contact. `OWNER_USER_ID` is the Telegram chat id that receives anonymous letters.
+`OWNER_USER_ID` also controls access to `/health`.
 
 ```bash
 .venv/bin/python -m bot.main
@@ -253,6 +277,32 @@ Stop the browser when done:
 ```bash
 docker compose --profile tools stop db-browser
 ```
+
+## Web Monitoring
+
+Start the optional monitoring stack:
+
+```bash
+docker compose --profile monitoring up -d --build metrics-exporter prometheus grafana
+```
+
+Local URLs:
+
+```text
+http://127.0.0.1:9108/metrics
+http://127.0.0.1:9090
+http://127.0.0.1:3001
+```
+
+On a VPS, keep these ports bound to `127.0.0.1` and use an SSH tunnel:
+
+```bash
+ssh -L 3001:127.0.0.1:3001 -L 9090:127.0.0.1:9090 <user>@<server>
+```
+
+Grafana uses `GRAFANA_ADMIN_USER`, `GRAFANA_ADMIN_PASSWORD`, and `GRAFANA_HOST_PORT` from `.env`; if omitted, the credentials default to `admin`/`admin` and the host port defaults to `3001`. Change the password before using it beyond a private SSH tunnel.
+
+The exporter exposes aggregate metrics only, not Telegram user ids.
 
 ## Development
 
