@@ -17,7 +17,14 @@ The bot focuses on the parts of German that are easy to forget in a plain word l
 - Tracks daily, weekly, monthly, and overall statistics.
 - Sends daily reminders with timezone support, a compact learning overview, and quick command buttons.
 - Lets users contact the owner directly or send an anonymous letter through the bot.
+- Supports English and Russian interface language per user.
 - Provides a read-only SQLite web UI for inspecting the database.
+
+## Interface Language
+
+`/start` first shows a bilingual language choice with `English` and `Русский` buttons. After the user chooses, the bot saves the preference and shows the localized welcome text.
+
+The language can be changed later with `/language`, `/language en`, or `/language ru`. The preference is stored per Telegram user in SQLite, so reminders and later sessions use the same language.
 
 ## Learning Flow
 
@@ -85,12 +92,13 @@ Then it shows today, week, month, and overall counts for completed quizzes, adde
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Welcome message and command overview |
+| `/start` | Choose interface language, then show localized welcome |
 | `/help` | Interactive help |
 | `/add [tag]` | Add a batch of word cards |
 | `/learn [N] [tag]` | Learn new or Blackout words |
 | `/quiz [N] [tag]` | Review due words |
 | `/stats` | Show learning statistics |
+| `/language [en\|ru]` | Choose English or Russian interface |
 | `/list <tag>` | List words by tag |
 | `/tags` | Show all tags |
 | `/delete <word>` | Delete a saved word |
@@ -165,6 +173,7 @@ bot/
   safety.py            safety limits and graceful rejection helpers
   sm2.py               spaced repetition algorithm
   questions.py         shared answer matching and MC option helpers
+  i18n.py              English/Russian interface text and language helpers
   reminders.py         reminder scheduling
   handlers/contact.py  owner contact and anonymous letter flow
   stats.py             stats formatting
@@ -234,6 +243,7 @@ Useful tables:
 - `sm2_state` — word-level spaced repetition state
 - `quiz_history` — quiz and learn history, separated by `source`
 - `reminders` — daily reminder settings
+- `user_settings` — per-user interface language, currently `en` or `ru`
 
 Stop the browser when done:
 
@@ -255,7 +265,8 @@ The test suite uses in-memory SQLite fixtures for most database coverage. Docker
 
 ## Roadmap
 
-- AI-assisted context sentences
-- Grammar hints for cards
-- Smarter typo correction explanations
-- Richer progress visualizations
+- [x] English/Russian interface language with `/start` choice and `/language`
+- [ ] AI-assisted context sentences
+- [ ] Grammar hints for cards
+- [ ] Smarter typo correction explanations
+- [ ] Richer progress visualizations

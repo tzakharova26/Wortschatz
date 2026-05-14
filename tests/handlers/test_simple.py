@@ -14,6 +14,7 @@ from bot.handlers import (
     error_handler,
     help_callback,
     help_command,
+    language_callback,
     list_command,
     start_command,
     stats_command,
@@ -216,7 +217,21 @@ class TestStartHelp:
         await start_command(upd, fake_context)
         text = upd.message.reply_text.call_args.args[0]
         assert "Welcome" in text
+        assert "Добро пожаловать" in text
+        markup = upd.message.reply_text.call_args.kwargs["reply_markup"]
+        buttons = markup.inline_keyboard[0]
+        assert [b.text for b in buttons] == ["English", "Русский"]
+        assert [b.callback_data for b in buttons] == ["lang:start:en", "lang:start:ru"]
+
+    async def test_start_language_callback_sets_language_and_shows_welcome(
+        self, fake_update, fake_context
+    ):
+        upd = fake_update(callback_data="lang:start:ru")
+        await language_callback(upd, fake_context)
+        text = upd.callback_query.edit_message_text.call_args.args[0]
+        assert "Привет" in text
         assert "/quiz" in text
+        assert fake_context.user_data["language"] == "ru"
 
     async def test_help_command_shows_buttons(self, fake_update, fake_context):
         upd = fake_update()

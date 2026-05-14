@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 import aiosqlite
 
 from bot.database import get_learning_overview, get_stats
+from bot.i18n import normalize_language
 from bot.progress import format_stats_queue
 from bot.reminders import DEFAULT_TZ
 
@@ -13,8 +14,9 @@ from bot.reminders import DEFAULT_TZ
 _STATS_TZ = ZoneInfo(DEFAULT_TZ)
 
 
-async def get_user_stats(conn: aiosqlite.Connection, user_id: int) -> str:
+async def get_user_stats(conn: aiosqlite.Connection, user_id: int, lang: str = "en") -> str:
     """Format user statistics for display."""
+    lang = normalize_language(lang)
     now_local = datetime.now(_STATS_TZ)
     today = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
     week_ago = today - timedelta(days=7)
@@ -28,15 +30,30 @@ async def get_user_stats(conn: aiosqlite.Connection, user_id: int) -> str:
     overview = await get_learning_overview(conn, user_id)
 
     def _fmt(s: dict) -> str:
+        if lang == "ru":
+            return (
+                f"  Квизы: {s['quizzes_completed']}\n"
+                f"  Добавлено слов: {s['words_added']}\n"
+                f"  Выучено слов: {s['words_learned']}"
+            )
         return (
             f"  Quizzes: {s['quizzes_completed']}\n"
             f"  Words added: {s['words_added']}\n"
             f"  Words learned: {s['words_learned']}"
         )
 
+    if lang == "ru":
+        return (
+            "<b>Твоя статистика</b>\n\n"
+            f"{format_stats_queue(overview, lang)}\n\n"
+            f"<b>Сегодня:</b>\n{_fmt(today_stats)}\n\n"
+            f"<b>За 7 дней:</b>\n{_fmt(week_stats)}\n\n"
+            f"<b>За 30 дней:</b>\n{_fmt(month_stats)}\n\n"
+            f"<b>Всего:</b>\n{_fmt(total_stats)}"
+        )
     return (
         "<b>Your Statistics</b>\n\n"
-        f"{format_stats_queue(overview)}\n\n"
+        f"{format_stats_queue(overview, lang)}\n\n"
         f"<b>Today:</b>\n{_fmt(today_stats)}\n\n"
         f"<b>This week:</b>\n{_fmt(week_stats)}\n\n"
         f"<b>This month:</b>\n{_fmt(month_stats)}\n\n"

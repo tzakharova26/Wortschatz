@@ -68,6 +68,12 @@ CREATE TABLE IF NOT EXISTS reminders (
 );
 
 CREATE INDEX IF NOT EXISTS idx_reminders_user_id ON reminders(user_id);
+
+CREATE TABLE IF NOT EXISTS user_settings (
+    user_id INTEGER PRIMARY KEY,
+    language TEXT NOT NULL DEFAULT 'en',
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 VALID_PARTS_OF_SPEECH = {"n", "v", "adj", "adv", "prep"}
@@ -360,6 +366,8 @@ async def count_known_users(conn: aiosqlite.Connection) -> int:
             SELECT user_id FROM quiz_history
             UNION
             SELECT user_id FROM reminders
+            UNION
+            SELECT user_id FROM user_settings
         ) users
         """
     )
@@ -378,12 +386,39 @@ async def user_has_persisted_data(conn: aiosqlite.Connection, user_id: int) -> b
             SELECT 1 FROM quiz_history WHERE user_id = ?
             UNION
             SELECT 1 FROM reminders WHERE user_id = ?
+            UNION
+            SELECT 1 FROM user_settings WHERE user_id = ?
         ) AS exists_flag
         """,
-        (user_id, user_id, user_id, user_id),
+        (user_id, user_id, user_id, user_id, user_id),
     )
     row = await cursor.fetchone()
     return bool(row["exists_flag"])
+
+
+async def get_user_language(conn: aiosqlite.Connection, user_id: int) -> str:
+    cursor = await conn.execute(
+        "SELECT language FROM user_settings WHERE user_id = ?",
+        (user_id,),
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        return "en"
+    return row["language"] or "en"
+
+
+async def set_user_language(conn: aiosqlite.Connection, user_id: int, language: str) -> None:
+    if language not in {"en", "ru"}:
+        raise ValueError("language must be 'en' or 'ru'")
+    await conn.execute(
+        """INSERT INTO user_settings (user_id, language, updated_at)
+           VALUES (?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(user_id)
+           DO UPDATE SET language = excluded.language, updated_at = CURRENT_TIMESTAMP""",
+        (user_id, language),
+    )
+    await conn.commit()
+    log_user_action(logger, user_id, f"Language set to {language}")
 
 
 async def count_user_tags(conn: aiosqlite.Connection, user_id: int) -> int:

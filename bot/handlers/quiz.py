@@ -21,7 +21,6 @@ from bot.config import (
     QUALITY_WRONG,
     QUIZ_MAX_SIZE,
     QUIZ_SESSION_SIZE,
-    QUIZ_START_MESSAGE,
 )
 from bot.database import (
     get_due_words,
@@ -30,6 +29,7 @@ from bot.database import (
     get_words_by_pos,
     parse_irregular_forms,
 )
+from bot.i18n import quiz_start_message
 from bot.logging_config import get_logger, log_user_action, log_user_warning
 from bot.progress import format_quiz_intro
 from bot.quiz import (
@@ -48,6 +48,7 @@ from ._shared import (
     QUIZ_ANSWERING,
     QUIZ_RATING,
     _get_conn,
+    _get_lang,
     _parse_quiz_args,
     _safe_log,
 )
@@ -62,19 +63,37 @@ def _clear_quiz_state(context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data.pop(k, None)
 
 
-def _rating_keyboard(correct: bool) -> InlineKeyboardMarkup:
+def _rating_keyboard(correct: bool, lang: str = "en") -> InlineKeyboardMarkup:
     """Return rating buttons: 2 relevant + misspell."""
     if correct:
         buttons = [
-            InlineKeyboardButton("Good", callback_data=f"{CB_RATE}{QUALITY_GOOD}"),
-            InlineKeyboardButton("Easy", callback_data=f"{CB_RATE}{QUALITY_EASY}"),
-            InlineKeyboardButton("Misspell", callback_data=f"{CB_RATE}misspell"),
+            InlineKeyboardButton(
+                "Хорошо" if lang == "ru" else "Good",
+                callback_data=f"{CB_RATE}{QUALITY_GOOD}",
+            ),
+            InlineKeyboardButton(
+                "Легко" if lang == "ru" else "Easy",
+                callback_data=f"{CB_RATE}{QUALITY_EASY}",
+            ),
+            InlineKeyboardButton(
+                "Опечатка" if lang == "ru" else "Misspell",
+                callback_data=f"{CB_RATE}misspell",
+            ),
         ]
     else:
         buttons = [
-            InlineKeyboardButton("Blackout", callback_data=f"{CB_RATE}{QUALITY_BLACKOUT}"),
-            InlineKeyboardButton("Wrong", callback_data=f"{CB_RATE}{QUALITY_WRONG}"),
-            InlineKeyboardButton("Misspell", callback_data=f"{CB_RATE}misspell"),
+            InlineKeyboardButton(
+                "Не вспомнила" if lang == "ru" else "Blackout",
+                callback_data=f"{CB_RATE}{QUALITY_BLACKOUT}",
+            ),
+            InlineKeyboardButton(
+                "Ошиблась" if lang == "ru" else "Wrong",
+                callback_data=f"{CB_RATE}{QUALITY_WRONG}",
+            ),
+            InlineKeyboardButton(
+                "Опечатка" if lang == "ru" else "Misspell",
+                callback_data=f"{CB_RATE}misspell",
+            ),
         ]
     return InlineKeyboardMarkup([buttons])
 
@@ -105,7 +124,8 @@ async def _send_question(reply_target, context: ContextTypes.DEFAULT_TYPE) -> No
     markup = _build_question_markup(q)
     idx = session.current_index + 1
     total = len(session.questions)
-    text = f"<b>Question {idx}/{total}</b>\n{html.escape(q.prompt)}"
+    title = "Вопрос" if session.lang == "ru" else "Question"
+    text = f"<b>{title} {idx}/{total}</b>\n{html.escape(q.prompt)}"
 
     await _edit_or_reply_session_message(
         context,
@@ -141,12 +161,17 @@ async def _edit_or_reply_session_message(
 async def quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     conn = _get_conn(context)
+    lang = await _get_lang(context, user_id)
     _clear_quiz_state(context)
 
     requested_size, tag = _parse_quiz_args(context.args or [])
 
     if requested_size is not None and requested_size <= 0:
-        await update.message.reply_text("Quiz size must be a positive number.")
+        await update.message.reply_text(
+            "Размер квиза должен быть положительным числом."
+            if lang == "ru"
+            else "Quiz size must be a positive number."
+        )
         return ConversationHandler.END
 
     capped = False
@@ -174,14 +199,28 @@ async def quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         unlearned = await get_needs_learning_words(conn, user_id, limit=1, tag=tag)
         overview = await get_learning_overview(conn, user_id, tag=tag)
         msg = "No words are due for /quiz right now."
+        if lang == "ru":
+            msg = "Сейчас нет слов, которые пора повторить в /quiz."
         if tag:
-            msg += f" (tag: #{tag})"
+            msg += f" (тег: #{tag})" if lang == "ru" else f" (tag: #{tag})"
         if unlearned:
-            msg += f" {overview['needs_learning']} word(s) are waiting in /learn."
+            msg += (
+                f" {overview['needs_learning']} слов ждут в /learn."
+                if lang == "ru"
+                else f" {overview['needs_learning']} word(s) are waiting in /learn."
+            )
         elif overview["review_words"]:
-            msg += " Your review words are scheduled for later by SM-2."
+            msg += (
+                " Твои слова запланированы SM-2 на более позднее время."
+                if lang == "ru"
+                else " Your review words are scheduled for later by SM-2."
+            )
         else:
-            msg += " Add some words first with /add."
+            msg += (
+                " Сначала добавь слова через /add."
+                if lang == "ru"
+                else " Add some words first with /add."
+            )
         await update.message.reply_text(msg)
         return ConversationHandler.END
 
@@ -190,17 +229,24 @@ async def quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     for pos in ("n", "v", "adj", "adv", "prep"):
         all_user_words.extend(await get_words_by_pos(conn, user_id, pos))
 
-    session = build_quiz_session(user_id, due_words, all_user_words, size=size)
+    session = build_quiz_session(user_id, due_words, all_user_words, size=size, lang=lang)
     context.user_data["quiz_session"] = session
     context.user_data["quiz_all_words"] = all_user_words
 
     overview = await get_learning_overview(conn, user_id, tag=tag)
-    intro = format_quiz_intro(overview, tag=tag) + "\n\n" + QUIZ_START_MESSAGE
+    intro = format_quiz_intro(overview, tag=tag, lang=lang) + "\n\n" + quiz_start_message(lang)
     if capped:
-        intro = f"(Capped to {QUIZ_MAX_SIZE} questions.)\n\n" + intro
+        intro = (
+            f"(Ограничено до {QUIZ_MAX_SIZE} вопросов.)\n\n"
+            if lang == "ru"
+            else f"(Capped to {QUIZ_MAX_SIZE} questions.)\n\n"
+        ) + intro
     if len(due_words) < size:
         intro += (
-            f"\nYou have only {len(due_words)} word(s) — they will repeat to fill "
+            f"\nУ тебя только {len(due_words)} слов — они повторятся, чтобы набрать "
+            f"{size} вопросов."
+            if lang == "ru"
+            else f"\nYou have only {len(due_words)} word(s) — they will repeat to fill "
             f"{size} questions."
         )
     await update.message.reply_text(intro, parse_mode="HTML")
@@ -208,7 +254,7 @@ async def quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return QUIZ_ANSWERING
 
 
-def _format_word_card(question) -> str:
+def _format_word_card(question, lang: str = "en") -> str:
     """Compact post-answer card with translation and relevant stored forms."""
     word = question.word
     lines = [
@@ -218,7 +264,8 @@ def _format_word_card(question) -> str:
     if word.get("part_of_speech") == "n":
         plural = word.get("plural")
         if plural and plural.strip():
-            lines.append(f"plural: {html.escape(plural)}")
+            label = "мн. число" if lang == "ru" else "plural"
+            lines.append(f"{label}: {html.escape(plural)}")
     elif word.get("part_of_speech") == "v":
         partizip = word.get("partizip_ii")
         if partizip and partizip.strip():
@@ -229,26 +276,33 @@ def _format_word_card(question) -> str:
                 f"{html.escape(k)}: {html.escape(v)}" for k, v in forms.items() if v
             )
             if forms_text:
-                lines.append(f"forms: {forms_text}")
+                label = "формы" if lang == "ru" else "forms"
+                lines.append(f"{label}: {forms_text}")
 
     if question.quiz_type == "verb_forms" and question.verb_form_key:
+        label = "спрашивали" if lang == "ru" else "asked"
         lines.append(
-            f"asked: {html.escape(question.verb_form_key)} → "
+            f"{label}: {html.escape(question.verb_form_key)} → "
             f"{html.escape(question.correct_answer)}"
         )
     elif question.quiz_type == "partizip":
-        lines.append(f"asked: Partizip II → {html.escape(question.correct_answer)}")
+        label = "спрашивали" if lang == "ru" else "asked"
+        lines.append(f"{label}: Partizip II → {html.escape(question.correct_answer)}")
     elif question.quiz_type == "plural":
-        lines.append(f"asked: plural → {html.escape(question.correct_answer)}")
+        label = "спрашивали" if lang == "ru" else "asked"
+        plural_label = "мн. число" if lang == "ru" else "plural"
+        lines.append(f"{label}: {plural_label} → {html.escape(question.correct_answer)}")
     return "\n".join(lines)
 
 
-def _format_answer_response(question, correct: bool) -> str:
+def _format_answer_response(question, correct: bool, lang: str = "en") -> str:
     """Build the post-answer card with HTML-escaped correct answer."""
-    card = _format_word_card(question)
+    card = _format_word_card(question, lang)
     if correct:
-        return card + "\n\nHow did it feel?"
+        return card + ("\n\nКак ощущалось?" if lang == "ru" else "\n\nHow did it feel?")
     safe_answer = html.escape(question.correct_answer or "")
+    if lang == "ru":
+        return f"<b>Почти.</b>\nОтвет: <b>{safe_answer}</b>\n\n{card}\n\nКак ощущалось?"
     return f"<b>Not quite.</b>\nAnswer: <b>{safe_answer}</b>\n\n{card}\n\nHow did it feel?"
 
 
@@ -256,7 +310,11 @@ async def quiz_text_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """Handle typed answer (translate, verb_forms, plural)."""
     session = context.user_data.get("quiz_session")
     if not session or session.is_finished:
-        await update.message.reply_text("No active quiz. Use /quiz to start one.")
+        await update.message.reply_text(
+            "Нет активного квиза. Используй /quiz, чтобы начать."
+            if await _get_lang(context, update.effective_user.id) == "ru"
+            else "No active quiz. Use /quiz to start one."
+        )
         return ConversationHandler.END
 
     q = session.current_question
@@ -264,13 +322,13 @@ async def quiz_text_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     correct = check_answer(q, user_answer)
     context.user_data["last_answer_correct"] = correct
 
-    text = _format_answer_response(q, correct)
+    text = _format_answer_response(q, correct, session.lang)
     await _edit_or_reply_session_message(
         context,
         "quiz_message",
         update.message,
         text,
-        reply_markup=_rating_keyboard(correct),
+        reply_markup=_rating_keyboard(correct, session.lang),
     )
     return QUIZ_RATING
 
@@ -282,7 +340,12 @@ async def quiz_button_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     session = context.user_data.get("quiz_session")
     if not session or session.is_finished:
-        await query.message.reply_text("No active quiz. Use /quiz to start one.")
+        lang = await _get_lang(context, update.effective_user.id)
+        await query.message.reply_text(
+            "Нет активного квиза. Используй /quiz, чтобы начать."
+            if lang == "ru"
+            else "No active quiz. Use /quiz to start one."
+        )
         return ConversationHandler.END
 
     q = session.current_question
@@ -305,11 +368,11 @@ async def quiz_button_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
     correct = check_answer(q, user_answer)
     context.user_data["last_answer_correct"] = correct
 
-    text = _format_answer_response(q, correct)
+    text = _format_answer_response(q, correct, session.lang)
 
     await query.edit_message_text(
         text,
-        reply_markup=_rating_keyboard(correct),
+        reply_markup=_rating_keyboard(correct, session.lang),
         parse_mode="HTML",
     )
     context.user_data["quiz_message"] = query.message
@@ -323,7 +386,12 @@ async def quiz_rating(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     session = context.user_data.get("quiz_session")
     if not session or session.is_finished:
-        await query.message.reply_text("No active quiz. Use /quiz to start one.")
+        lang = await _get_lang(context, update.effective_user.id)
+        await query.message.reply_text(
+            "Нет активного квиза. Используй /quiz, чтобы начать."
+            if lang == "ru"
+            else "No active quiz. Use /quiz to start one."
+        )
         return ConversationHandler.END
 
     rate_data = query.data.removeprefix(CB_RATE)
@@ -340,9 +408,13 @@ async def quiz_rating(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 f"limit={limit}",
             )
             await query.edit_message_text(
-                "This quiz has reached the repeat limit. Please choose Good, Easy, "
-                "Wrong, or Blackout instead.",
-                reply_markup=_rating_keyboard(correct),
+                (
+                    "Этот квиз достиг лимита повторов. Выбери Good, Easy, Wrong или Blackout."
+                    if session.lang == "ru"
+                    else "This quiz has reached the repeat limit. Please choose Good, Easy, "
+                    "Wrong, or Blackout instead."
+                ),
+                reply_markup=_rating_keyboard(correct, session.lang),
             )
             return QUIZ_RATING
         all_words = context.user_data.get("quiz_all_words", [])
@@ -353,7 +425,9 @@ async def quiz_rating(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             quality = int(rate_data)
         except ValueError:
             log_user_warning(logger, session.user_id, f"Invalid rating data: {rate_data!r}")
-            await query.edit_message_text("Invalid rating.")
+            await query.edit_message_text(
+                "Некорректная оценка." if session.lang == "ru" else "Invalid rating."
+            )
             return QUIZ_RATING
         session.record_result(quality, correct)
 
@@ -381,7 +455,11 @@ async def _finish_quiz(query, context: ContextTypes.DEFAULT_TYPE) -> int:
     if limit_message:
         summary += f"\n\n{html.escape(limit_message)}"
     elif failures:
-        summary += f"\n\n(Note: {failures} result(s) could not be saved due to a database error.)"
+        summary += (
+            f"\n\n(Примечание: не удалось сохранить результатов: {failures}.)"
+            if session.lang == "ru"
+            else f"\n\n(Note: {failures} result(s) could not be saved due to a database error.)"
+        )
     await _edit_or_reply_session_message(context, "quiz_message", query.message, summary)
 
     _clear_quiz_state(context)
@@ -395,6 +473,7 @@ async def quiz_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     and quiz_history before the session is cleared, so partial progress shows up
     in /stats."""
     user_id = update.effective_user.id
+    lang = await _get_lang(context, user_id)
     session = context.user_data.get("quiz_session")
     rated = sum(1 for r in (session.results if session else []) if r is not None)
     log_user_action(logger, user_id, f"Quiz cancelled (rated={rated})")
@@ -405,18 +484,24 @@ async def quiz_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         try:
             await ensure_db_size_allows_write(conn, user_id)
             failures = await apply_results(conn, session)
-            msg = "Quiz cancelled. Partial progress saved.\n\n" + summary
+            msg = (
+                "Квиз отменен. Частичный прогресс сохранен.\n\n"
+                if lang == "ru"
+                else "Quiz cancelled. Partial progress saved.\n\n"
+            ) + summary
             if failures:
                 msg += (
-                    f"\n\n(Note: {failures} result(s) could not be saved due to "
+                    f"\n\n(Примечание: не удалось сохранить результатов: {failures}.)"
+                    if lang == "ru"
+                    else f"\n\n(Note: {failures} result(s) could not be saved due to "
                     "a database error.)"
                 )
         except LimitExceeded as e:
             log_user_warning(logger, user_id, e.log_message)
-            msg = "Quiz cancelled.\n\n" + e.user_message
+            msg = ("Квиз отменен.\n\n" if lang == "ru" else "Quiz cancelled.\n\n") + e.user_message
         await update.message.reply_text(msg, parse_mode="HTML")
     else:
-        await update.message.reply_text("Quiz cancelled.")
+        await update.message.reply_text("Квиз отменен." if lang == "ru" else "Quiz cancelled.")
 
     _clear_quiz_state(context)
     return ConversationHandler.END

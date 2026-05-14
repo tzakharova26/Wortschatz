@@ -15,7 +15,8 @@ from typing import Any
 
 from telegram.ext import ContextTypes
 
-from bot.database import parse_irregular_forms
+from bot.database import get_user_language, parse_irregular_forms
+from bot.i18n import DEFAULT_LANGUAGE, normalize_language
 from bot.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -72,11 +73,26 @@ CB_LEARN_MC = "lmc:"
 CB_LEARN_ART = "lart:"
 CB_LEARN_BATCH = "lbatch:"  # Post-/add "Start learning" button
 CB_OWNER = "owner:"
+CB_LANG = "lang:"
 
 
 def _get_conn(context: ContextTypes.DEFAULT_TYPE):
     """Get the database connection from bot_data."""
     return context.bot_data["db_conn"]
+
+
+async def _get_lang(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> str:
+    """Get the persisted UI language for a user, defaulting to English."""
+    cached = context.user_data.get("language")
+    if cached:
+        return normalize_language(cached)
+    try:
+        lang = await get_user_language(_get_conn(context), user_id)
+    except Exception:
+        return DEFAULT_LANGUAGE
+    lang = normalize_language(lang)
+    context.user_data["language"] = lang
+    return lang
 
 
 def _safe_log(text: str | None, max_len: int = 200) -> str:
@@ -101,7 +117,7 @@ async def _drop_buttons(query, user_id: int) -> None:
         logger.debug("Could not strip keyboard: %s", e, extra={"user_id": user_id})
 
 
-def _format_word_tables(words: list[dict], show_ids: bool = True) -> str:
+def _format_word_tables(words: list[dict], show_ids: bool = True, lang: str = "en") -> str:
     """Format words grouped by POS as readable tables. HTML-escaped.
 
     ``show_ids=True`` (default) prints the ``[id]`` prefix used by /list (and
@@ -115,11 +131,11 @@ def _format_word_tables(words: list[dict], show_ids: bool = True) -> str:
 
     lines = []
     pos_labels = {
-        "n": "Nouns",
-        "v": "Verbs",
-        "adj": "Adjectives",
-        "adv": "Adverbs",
-        "prep": "Prepositions",
+        "n": "Существительные" if lang == "ru" else "Nouns",
+        "v": "Глаголы" if lang == "ru" else "Verbs",
+        "adj": "Прилагательные" if lang == "ru" else "Adjectives",
+        "adv": "Наречия" if lang == "ru" else "Adverbs",
+        "prep": "Предлоги" if lang == "ru" else "Prepositions",
     }
 
     def esc(s) -> str:

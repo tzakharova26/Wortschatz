@@ -6,6 +6,7 @@ from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandle
 from bot.database import get_connection, init_db
 from bot.handlers import (
     CB_HELP,
+    CB_LANG,
     delete_command,
     delete_confirm_command,
     error_handler,
@@ -15,6 +16,8 @@ from bot.handlers import (
     get_quiz_conversation,
     help_callback,
     help_command,
+    language_callback,
+    language_command,
     list_command,
     reminders_command,
     remindme_command,
@@ -70,6 +73,7 @@ def main() -> None:
     # Simple commands
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("language", language_command))
     app.add_handler(CommandHandler("list", list_command))
     app.add_handler(CommandHandler("tags", tags_command))
     app.add_handler(CommandHandler("delete", delete_command))
@@ -81,6 +85,7 @@ def main() -> None:
 
     # Help callback buttons
     app.add_handler(CallbackQueryHandler(help_callback, pattern=f"^{CB_HELP}"))
+    app.add_handler(CallbackQueryHandler(language_callback, pattern=f"^{CB_LANG}"))
 
     # Global error handler
     app.add_error_handler(error_handler)

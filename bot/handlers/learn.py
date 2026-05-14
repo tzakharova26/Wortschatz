@@ -22,8 +22,9 @@ from telegram.ext import (
 )
 
 from bot import learn as learn_core
-from bot.config import LEARN_MAX_SIZE, LEARN_MIN_SIZE, LEARN_START_MESSAGE
+from bot.config import LEARN_MAX_SIZE, LEARN_MIN_SIZE
 from bot.database import get_needs_learning_words, get_words_by_pos
+from bot.i18n import learn_start_message
 from bot.logging_config import get_logger, log_user_action, log_user_error, log_user_warning
 from bot.safety import LimitExceeded, ensure_db_size_allows_write
 
@@ -35,6 +36,7 @@ from ._shared import (
     LEARN_ANSWERING,
     _drop_buttons,
     _get_conn,
+    _get_lang,
     _parse_quiz_args,
     _safe_log,
     pending_pop,
@@ -49,11 +51,18 @@ def _clear_learn_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("learn_feedback", None)
 
 
-def _build_learn_step_markup(step) -> InlineKeyboardMarkup | None:
+def _build_learn_step_markup(step, lang: str = "en") -> InlineKeyboardMarkup | None:
     """Inline keyboard for the current learn step. Typed/verb_form/plural steps return None."""
     if step.step_type == learn_core.SHOW:
         return InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Got it", callback_data=f"{CB_LEARN_SHOW}ok")]]
+            [
+                [
+                    InlineKeyboardButton(
+                        "Понятно" if lang == "ru" else "Got it",
+                        callback_data=f"{CB_LEARN_SHOW}ok",
+                    )
+                ]
+            ]
         )
     if step.step_type == learn_core.MC and step.options:
         return InlineKeyboardMarkup(
@@ -76,16 +85,21 @@ async def _send_learn_step(reply_target, context: ContextTypes.DEFAULT_TYPE) -> 
     if step is None:
         return
 
-    markup = _build_learn_step_markup(step)
+    markup = _build_learn_step_markup(step, session.lang)
     idx = session.current_index + 1
     # Retries get appended to ``steps`` only at end-of-main-run, but the user
     # should see the counter grow as soon as a wrong answer queues a retry.
     total = len(session.steps) + len(session.retry_queue)
     retry_tag = f" (retry {step.attempt - 1}/2)" if step.attempt > 1 else ""
+    if session.lang == "ru":
+        retry_tag = f" (повтор {step.attempt - 1}/2)" if step.attempt > 1 else ""
     if step.step_type == learn_core.SHOW:
-        text = f"<b>Step {idx}/{total} — see card</b>{retry_tag}\n\n{step.prompt}"
+        label = "Шаг" if session.lang == "ru" else "Step"
+        see_card = "карточка" if session.lang == "ru" else "see card"
+        text = f"<b>{label} {idx}/{total} — {see_card}</b>{retry_tag}\n\n{step.prompt}"
     else:
-        text = f"<b>Step {idx}/{total}</b>{retry_tag}\n{html.escape(step.prompt)}"
+        label = "Шаг" if session.lang == "ru" else "Step"
+        text = f"<b>{label} {idx}/{total}</b>{retry_tag}\n{html.escape(step.prompt)}"
 
     feedback = context.user_data.pop("learn_feedback", None)
     if feedback:
@@ -131,7 +145,12 @@ async def _start_learn_session(
     """Shared session-bootstrap used by both /learn and the post-/add button."""
     if not words:
         await reply_target.reply_text(
-            "Nothing to learn — every word has been seen at least once. Use /add to "
+            (
+                "Сейчас нечего учить — все слова уже хотя бы раз проходили /learn. "
+                "Добавь новые через /add или повторяй старые через /quiz."
+            )
+            if await _get_lang(context, user_id) == "ru"
+            else "Nothing to learn — every word has been seen at least once. Use /add to "
             "add new words, or /quiz to revise existing ones."
         )
         return ConversationHandler.END
@@ -141,10 +160,11 @@ async def _start_learn_session(
     for pos in ("n", "v", "adj", "adv", "prep"):
         all_user_words.extend(await get_words_by_pos(conn, user_id, pos))
 
-    session = learn_core.build_session(user_id, words, all_user_words)
+    lang = await _get_lang(context, user_id)
+    session = learn_core.build_session(user_id, words, all_user_words, lang=lang)
     context.user_data["learn_session"] = session
 
-    intro = LEARN_START_MESSAGE.format(n=len(words))
+    intro = learn_start_message(len(words), lang)
     await reply_target.reply_text(intro)
     await _send_learn_step(reply_target, context)
     return LEARN_ANSWERING
@@ -153,19 +173,32 @@ async def _start_learn_session(
 async def learn_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Entry point for /learn [N] [tag]. Mirrors /quiz arg parsing."""
     user_id = update.effective_user.id
+    lang = await _get_lang(context, user_id)
     _clear_learn_state(context)
     requested_size, tag = _parse_quiz_args(context.args or [])
 
     if requested_size is not None and requested_size <= 0:
-        await update.message.reply_text("Learn size must be a positive number.")
+        await update.message.reply_text(
+            "Размер /learn должен быть положительным числом."
+            if lang == "ru"
+            else "Learn size must be a positive number."
+        )
         return ConversationHandler.END
 
     notice: str | None = None
     if requested_size is not None and requested_size > LEARN_MAX_SIZE:
-        notice = f"(Capped to {LEARN_MAX_SIZE} words.)"
+        notice = (
+            f"(Ограничено до {LEARN_MAX_SIZE} слов.)"
+            if lang == "ru"
+            else f"(Capped to {LEARN_MAX_SIZE} words.)"
+        )
         requested_size = LEARN_MAX_SIZE
     elif requested_size is not None and requested_size < LEARN_MIN_SIZE:
-        notice = f"(Bumped to minimum of {LEARN_MIN_SIZE} words.)"
+        notice = (
+            f"(Поднято до минимума: {LEARN_MIN_SIZE} слов.)"
+            if lang == "ru"
+            else f"(Bumped to minimum of {LEARN_MIN_SIZE} words.)"
+        )
         requested_size = LEARN_MIN_SIZE
     size = requested_size if requested_size is not None else LEARN_MAX_SIZE
 
@@ -214,7 +247,11 @@ async def learn_batch_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if not word_ids:
         await query.message.reply_text(
-            "Those new words are no longer available — try /learn directly."
+            (
+                "Эти новые слова уже недоступны — попробуй /learn напрямую."
+                if await _get_lang(context, user_id) == "ru"
+                else "Those new words are no longer available — try /learn directly."
+            )
         )
         return ConversationHandler.END
 
@@ -238,7 +275,12 @@ async def learn_button_answer(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     session: learn_core.LearnSession | None = context.user_data.get("learn_session")
     if not session or session.is_finished:
-        await query.message.reply_text("No active learning session. Use /learn to start one.")
+        lang = await _get_lang(context, update.effective_user.id)
+        await query.message.reply_text(
+            "Нет активной сессии обучения. Используй /learn, чтобы начать."
+            if lang == "ru"
+            else "No active learning session. Use /learn to start one."
+        )
         return ConversationHandler.END
 
     step = session.current_step
@@ -265,7 +307,7 @@ async def learn_button_answer(update: Update, context: ContextTypes.DEFAULT_TYPE
         correct = learn_core.check_answer(step, user_answer)
         session.record_step(correct=correct)
         if not correct:
-            context.user_data["learn_feedback"] = _format_learn_feedback(step)
+            context.user_data["learn_feedback"] = _format_learn_feedback(step, session.lang)
     else:
         log_user_warning(logger, session.user_id, f"Unknown learn callback: {data!r}")
         return LEARN_ANSWERING
@@ -281,7 +323,12 @@ async def learn_text_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     """Handles TYPED, PARTIZIP, VERB_FORM, and PLURAL steps."""
     session: learn_core.LearnSession | None = context.user_data.get("learn_session")
     if not session or session.is_finished:
-        await update.message.reply_text("No active learning session. Use /learn to start one.")
+        lang = await _get_lang(context, update.effective_user.id)
+        await update.message.reply_text(
+            "Нет активной сессии обучения. Используй /learn, чтобы начать."
+            if lang == "ru"
+            else "No active learning session. Use /learn to start one."
+        )
         return ConversationHandler.END
 
     step = session.current_step
@@ -292,14 +339,18 @@ async def learn_text_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         learn_core.PLURAL,
     ):
         # User typed during a button-only step. Just nudge them.
-        await update.message.reply_text("Please use the buttons above.")
+        await update.message.reply_text(
+            "Пожалуйста, используй кнопки выше."
+            if session.lang == "ru"
+            else "Please use the buttons above."
+        )
         return LEARN_ANSWERING
 
     user_answer = update.message.text.strip()
     correct = learn_core.check_answer(step, user_answer)
     session.record_step(correct=correct)
     if not correct:
-        context.user_data["learn_feedback"] = _format_learn_feedback(step)
+        context.user_data["learn_feedback"] = _format_learn_feedback(step, session.lang)
 
     if session.is_finished:
         return await _finish_learn(update.message, context)
@@ -308,8 +359,10 @@ async def learn_text_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return LEARN_ANSWERING
 
 
-def _format_learn_feedback(step) -> str:
+def _format_learn_feedback(step, lang: str = "en") -> str:
     safe_answer = html.escape(step.correct_answer or "")
+    if lang == "ru":
+        return f"<b>Повторим это позже.</b>\nОтвет: <b>{safe_answer}</b>"
     return f"<b>Try this one again later.</b>\nAnswer: <b>{safe_answer}</b>"
 
 
@@ -338,7 +391,11 @@ async def _finish_learn(reply_target, context: ContextTypes.DEFAULT_TYPE) -> int
     if graduated == -1 and limit_message:
         summary += f"\n\n{html.escape(limit_message)}"
     elif graduated == -1:
-        summary += "\n\n(Note: some graduations could not be saved due to a database error.)"
+        summary += (
+            "\n\n(Примечание: часть прогресса не удалось сохранить из-за ошибки базы данных.)"
+            if session.lang == "ru"
+            else "\n\n(Note: some graduations could not be saved due to a database error.)"
+        )
     await _edit_or_reply_session_message(
         context,
         "learn_message",
@@ -359,6 +416,7 @@ async def learn_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     """Abort an active learning session. Any words that already fully passed are
     graduated before clearing state — same partial-progress idea as quiz_cancel."""
     user_id = update.effective_user.id
+    lang = await _get_lang(context, user_id)
     session: learn_core.LearnSession | None = context.user_data.get("learn_session")
     log_user_action(logger, user_id, "Learn cancelled")
 
@@ -369,17 +427,29 @@ async def learn_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             await learn_core.apply_graduations(conn, session)
             summary = learn_core.format_summary(session)
             await update.message.reply_text(
-                "Learning cancelled. Partial progress saved.\n\n" + summary,
+                (
+                    "Обучение отменено. Частичный прогресс сохранен.\n\n"
+                    if lang == "ru"
+                    else "Learning cancelled. Partial progress saved.\n\n"
+                )
+                + summary,
                 parse_mode="HTML",
             )
         except LimitExceeded as e:
             log_user_warning(logger, user_id, e.log_message)
-            await update.message.reply_text("Learning cancelled.\n\n" + e.user_message)
+            await update.message.reply_text(
+                ("Обучение отменено.\n\n" if lang == "ru" else "Learning cancelled.\n\n")
+                + e.user_message
+            )
         except Exception as e:
             log_user_error(logger, user_id, f"Failed to save partial graduations: {e}", exc_info=e)
-            await update.message.reply_text("Learning cancelled.")
+            await update.message.reply_text(
+                "Обучение отменено." if lang == "ru" else "Learning cancelled."
+            )
     else:
-        await update.message.reply_text("Learning cancelled.")
+        await update.message.reply_text(
+            "Обучение отменено." if lang == "ru" else "Learning cancelled."
+        )
 
     _clear_learn_state(context)
     return ConversationHandler.END

@@ -15,9 +15,10 @@ from telegram.ext import (
 )
 
 from bot.config import MAX_OWNER_MESSAGE_CHARS, get_owner_tg_nickname, get_owner_user_id
+from bot.i18n import normalize_language
 from bot.logging_config import get_logger, log_user_action, log_user_error, log_user_warning
 
-from ._shared import CB_OWNER, CONTACT_WRITING, _safe_log
+from ._shared import CB_OWNER, CONTACT_WRITING, _get_lang, _safe_log
 
 logger = get_logger(__name__)
 
@@ -31,8 +32,16 @@ def _owner_label() -> str:
     return nickname
 
 
-def _contact_text() -> str:
+def _contact_text(lang: str = "en") -> str:
+    lang = normalize_language(lang)
     owner = html.escape(_owner_label())
+    if lang == "ru":
+        return (
+            "<b>Связаться с владельцем</b>\n\n"
+            f"Если хочешь, можешь написать владельцу напрямую: <b>{owner}</b>.\n\n"
+            "Также можно написать письмо здесь. Бот перешлет его владельцу "
+            "анонимно, без информации об отправителе."
+        )
     return (
         "<b>Contact the owner</b>\n\n"
         f"If you want, you can directly contact the owner: <b>{owner}</b>.\n\n"
@@ -41,19 +50,23 @@ def _contact_text() -> str:
     )
 
 
-def _contact_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Write anonymous letter", callback_data=f"{CB_OWNER}write")]]
+def _contact_keyboard(lang: str = "en") -> InlineKeyboardMarkup:
+    text = (
+        "Написать анонимное письмо"
+        if normalize_language(lang) == "ru"
+        else "Write anonymous letter"
     )
+    return InlineKeyboardMarkup([[InlineKeyboardButton(text, callback_data=f"{CB_OWNER}write")]])
 
 
 async def contact_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
+    lang = await _get_lang(context, user_id)
     log_user_action(logger, user_id, "/contact")
     await update.message.reply_text(
-        _contact_text(),
+        _contact_text(lang),
         parse_mode="HTML",
-        reply_markup=_contact_keyboard(),
+        reply_markup=_contact_keyboard(lang),
     )
     return ConversationHandler.END
 
@@ -62,14 +75,15 @@ async def contact_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    lang = await _get_lang(context, user_id)
     action = (query.data or "").removeprefix(CB_OWNER)
 
     if action == "info":
         log_user_action(logger, user_id, "Contact owner info opened")
         await query.edit_message_text(
-            _contact_text(),
+            _contact_text(lang),
             parse_mode="HTML",
-            reply_markup=_contact_keyboard(),
+            reply_markup=_contact_keyboard(lang),
         )
         return ConversationHandler.END
 
@@ -79,17 +93,28 @@ async def contact_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     log_user_action(logger, user_id, "Anonymous owner letter started")
     await query.edit_message_text(
-        "Write your letter in the next message. It will be sent to the owner anonymously.\n\n"
-        "Send /cancel to stop.",
+        (
+            "Напиши письмо следующим сообщением. Оно будет отправлено владельцу анонимно.\n\n"
+            "Отправь /cancel, чтобы остановиться."
+            if lang == "ru"
+            else "Write your letter in the next message. It will be sent to the owner "
+            "anonymously.\n\n"
+            "Send /cancel to stop."
+        ),
     )
     return CONTACT_WRITING
 
 
 async def contact_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
+    lang = await _get_lang(context, user_id)
     text = (update.message.text or "").strip()
     if not text:
-        await update.message.reply_text("Empty message was not sent. Write a message or /cancel.")
+        await update.message.reply_text(
+            "Пустое сообщение не отправлено. Напиши текст или /cancel."
+            if lang == "ru"
+            else "Empty message was not sent. Write a message or /cancel."
+        )
         return CONTACT_WRITING
     if len(text) > MAX_OWNER_MESSAGE_CHARS:
         log_user_warning(
@@ -98,7 +123,12 @@ async def contact_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"Owner letter too long: len={len(text)}, limit={MAX_OWNER_MESSAGE_CHARS}",
         )
         await update.message.reply_text(
-            f"Your message is too long ({len(text)} characters). Maximum is "
+            (
+                f"Сообщение слишком длинное ({len(text)} символов). Максимум: "
+                f"{MAX_OWNER_MESSAGE_CHARS}. Ничего не отправлено."
+            )
+            if lang == "ru"
+            else f"Your message is too long ({len(text)} characters). Maximum is "
             f"{MAX_OWNER_MESSAGE_CHARS}. Nothing was sent."
         )
         return CONTACT_WRITING
@@ -107,7 +137,12 @@ async def contact_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if owner_id is None:
         log_user_warning(logger, user_id, "Owner letter not sent: OWNER_USER_ID missing/invalid")
         await update.message.reply_text(
-            "Anonymous letters are not configured yet. Please contact the owner directly: "
+            (
+                "Анонимные письма пока не настроены. Напиши владельцу напрямую: "
+                f"{html.escape(_owner_label())}."
+            )
+            if lang == "ru"
+            else "Anonymous letters are not configured yet. Please contact the owner directly: "
             f"{html.escape(_owner_label())}."
         )
         return ConversationHandler.END
@@ -120,17 +155,24 @@ async def contact_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
     except Exception as e:
         log_user_error(logger, user_id, f"Failed to send anonymous owner letter: {e}", exc_info=e)
-        await update.message.reply_text("Could not send the message. Please try again later.")
+        await update.message.reply_text(
+            "Не удалось отправить сообщение. Попробуй позже."
+            if lang == "ru"
+            else "Could not send the message. Please try again later."
+        )
         return ConversationHandler.END
 
     log_user_action(logger, user_id, "Anonymous owner letter sent")
-    await update.message.reply_text("Your message was sent anonymously.")
+    await update.message.reply_text(
+        "Сообщение отправлено анонимно." if lang == "ru" else "Your message was sent anonymously."
+    )
     return ConversationHandler.END
 
 
 async def contact_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     log_user_action(logger, update.effective_user.id, "Anonymous owner letter cancelled")
-    await update.message.reply_text("Message cancelled.")
+    lang = await _get_lang(context, update.effective_user.id)
+    await update.message.reply_text("Сообщение отменено." if lang == "ru" else "Message cancelled.")
     return ConversationHandler.END
 
 

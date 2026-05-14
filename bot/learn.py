@@ -24,6 +24,7 @@ from bot.database import (
     parse_irregular_forms,
     upsert_sm2_state,
 )
+from bot.i18n import normalize_language
 from bot.logging_config import get_logger, log_user_action, log_user_error
 from bot.questions import (
     german_with_article,
@@ -68,6 +69,7 @@ class LearnSession:
     word_step_passed: dict[int, set[str]] = field(default_factory=dict)
     retry_queue: list[LearnStep] = field(default_factory=list)
     retries_appended: bool = False
+    lang: str = "en"
 
     @property
     def is_finished(self) -> bool:
@@ -182,62 +184,87 @@ def _build_show_step(word: dict) -> LearnStep:
     )
 
 
-def _build_mc_step(word: dict, all_words: list[dict]) -> LearnStep:
+def _build_mc_step(word: dict, all_words: list[dict], lang: str = "en") -> LearnStep:
     options, correct = multiple_choice_options(word, all_words)
+    prompt = (
+        f"Что значит '{german_with_article(word)}'?"
+        if normalize_language(lang) == "ru"
+        else f"What does '{german_with_article(word)}' mean?"
+    )
     return LearnStep(
         word=word,
         step_type=MC,
-        prompt=f"What does '{german_with_article(word)}' mean?",
+        prompt=prompt,
         options=options,
         correct_answer=correct,
     )
 
 
-def _build_typed_step(word: dict) -> LearnStep:
+def _build_typed_step(word: dict, lang: str = "en") -> LearnStep:
+    prompt = (
+        f"Напиши по-немецки: {word['translation']}"
+        if normalize_language(lang) == "ru"
+        else f"Type in German: {word['translation']}"
+    )
     return LearnStep(
         word=word,
         step_type=TYPED,
-        prompt=f"Type in German: {word['translation']}",
+        prompt=prompt,
         options=None,
         correct_answer=german_with_article(word),
     )
 
 
-def _build_article_step(word: dict) -> LearnStep:
+def _build_article_step(word: dict, lang: str = "en") -> LearnStep:
+    prompt = (
+        f"Выбери артикль для '{word['german']}'"
+        if normalize_language(lang) == "ru"
+        else f"Pick the article for '{word['german']}'"
+    )
     return LearnStep(
         word=word,
         step_type=ARTICLE,
-        prompt=f"Pick the article for '{word['german']}'",
+        prompt=prompt,
         options=["der", "die", "das"],
         correct_answer=word["article"],
     )
 
 
-def _build_plural_step(word: dict) -> LearnStep:
+def _build_plural_step(word: dict, lang: str = "en") -> LearnStep:
     # German plural article is always "die"; storing it on the answer means the
     # feedback text shows "die Katzen" — reinforcing the article alongside the
     # plural. ``is_correct("plural", ...)`` accepts user input either with or
     # without the leading "die ", so this is display-only enrichment.
+    prompt = (
+        f"Напиши множественное число для '{german_with_article(word)}'"
+        if normalize_language(lang) == "ru"
+        else f"Type the plural of '{german_with_article(word)}'"
+    )
     return LearnStep(
         word=word,
         step_type=PLURAL,
-        prompt=f"Type the plural of '{german_with_article(word)}'",
+        prompt=prompt,
         options=None,
         correct_answer=f"die {word['plural']}",
     )
 
 
-def _build_partizip_step(word: dict) -> LearnStep:
+def _build_partizip_step(word: dict, lang: str = "en") -> LearnStep:
+    prompt = (
+        f"Напиши Partizip II для: {word['translation']}"
+        if normalize_language(lang) == "ru"
+        else f"Type the Partizip II for: {word['translation']}"
+    )
     return LearnStep(
         word=word,
         step_type=PARTIZIP,
-        prompt=f"Type the Partizip II for: {word['translation']}",
+        prompt=prompt,
         options=None,
         correct_answer=word["partizip_ii"],
     )
 
 
-def _build_verb_form_steps(word: dict) -> list[LearnStep]:
+def _build_verb_form_steps(word: dict, lang: str = "en") -> list[LearnStep]:
     forms = parse_irregular_forms(word.get("irregular_forms")) or {}
     usable = [(k, v) for k, v in forms.items() if v]
     random.shuffle(usable)
@@ -246,7 +273,11 @@ def _build_verb_form_steps(word: dict) -> list[LearnStep]:
         LearnStep(
             word=word,
             step_type=VERB_FORM,
-            prompt=f"Type the '{k}' form of '{word['german']}'",
+            prompt=(
+                f"Напиши форму '{k}' для '{word['german']}'"
+                if normalize_language(lang) == "ru"
+                else f"Type the '{k}' form of '{word['german']}'"
+            ),
             options=None,
             correct_answer=v,
             verb_form_key=k,
@@ -285,7 +316,9 @@ def _interleave_steps(per_word: list[list[LearnStep]]) -> list[LearnStep]:
     return out
 
 
-def build_session(user_id: int, words: list[dict], all_words: list[dict]) -> LearnSession:
+def build_session(
+    user_id: int, words: list[dict], all_words: list[dict], lang: str = "en"
+) -> LearnSession:
     """Build a learning session: per-word massed drill (show → MC → typed → extras),
     with steps interleaved across words so the same word doesn't repeat back-to-back
     when more than one word is being learned in the session."""
@@ -300,25 +333,25 @@ def build_session(user_id: int, words: list[dict], all_words: list[dict]) -> Lea
         word_steps.append(_build_show_step(w))
         word_required.add(SHOW)
 
-        word_steps.append(_build_mc_step(w, all_words))
+        word_steps.append(_build_mc_step(w, all_words, lang))
         word_required.add(MC)
 
-        word_steps.append(_build_typed_step(w))
+        word_steps.append(_build_typed_step(w, lang))
         word_required.add(TYPED)
 
         if w["part_of_speech"] == "n":
             if w.get("article"):
-                word_steps.append(_build_article_step(w))
+                word_steps.append(_build_article_step(w, lang))
                 word_required.add(ARTICLE)
             if w.get("plural") and w["plural"].strip():
-                word_steps.append(_build_plural_step(w))
+                word_steps.append(_build_plural_step(w, lang))
                 word_required.add(PLURAL)
         elif w["part_of_speech"] == "v":
             if w.get("partizip_ii") and w["partizip_ii"].strip():
-                word_steps.append(_build_partizip_step(w))
+                word_steps.append(_build_partizip_step(w, lang))
                 word_required.add(PARTIZIP)
 
-        for vs in _build_verb_form_steps(w):
+        for vs in _build_verb_form_steps(w, lang):
             word_steps.append(vs)
             word_required.add(f"{VERB_FORM}:{vs.verb_form_key}")
 
@@ -332,7 +365,7 @@ def build_session(user_id: int, words: list[dict], all_words: list[dict]) -> Lea
         user_id,
         f"Learn session created: {len(words)} word(s), {len(steps)} step(s)",
     )
-    return LearnSession(user_id=user_id, steps=steps, required_per_word=required)
+    return LearnSession(user_id=user_id, steps=steps, required_per_word=required, lang=lang)
 
 
 def check_answer(step: LearnStep, user_answer: str) -> bool:
@@ -415,14 +448,25 @@ def format_summary(session: LearnSession) -> str:
             needs_more.append(s.word)
 
     lines = [f"<b>Learning complete.</b> Graduated {len(graduated)}/{len(seen)} word(s)."]
+    lang = normalize_language(session.lang)
+    if lang == "ru":
+        lines = [f"<b>Обучение закончено.</b> Выучено {len(graduated)}/{len(seen)} слов."]
     if graduated:
-        lines.append("\n<b>Graduated</b> (now eligible for /quiz):")
+        lines.append(
+            "\n<b>Выучено</b> (теперь доступно в /quiz):"
+            if lang == "ru"
+            else "\n<b>Graduated</b> (now eligible for /quiz):"
+        )
         for w in graduated:
             lines.append(
                 f"  + {html.escape(german_with_article(w))} — {html.escape(w['translation'])}"
             )
     if needs_more:
-        lines.append("\n<b>Needs more work</b> (will return in next /learn):")
+        lines.append(
+            "\n<b>Нужно еще повторить</b> (вернется в следующем /learn):"
+            if lang == "ru"
+            else "\n<b>Needs more work</b> (will return in next /learn):"
+        )
         for w in needs_more:
             lines.append(
                 f"  - {html.escape(german_with_article(w))} — {html.escape(w['translation'])}"

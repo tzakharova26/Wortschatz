@@ -27,6 +27,7 @@ from bot.database import (
     merge_tag,
     update_word_tags,
 )
+from bot.i18n import add_format_message, normalize_language
 from bot.logging_config import get_logger, log_user_action, log_user_error, log_user_warning
 from bot.safety import (
     LimitExceeded,
@@ -47,6 +48,7 @@ from ._shared import (
     _drop_buttons,
     _format_word_tables,
     _get_conn,
+    _get_lang,
     _safe_log,
     pending_set,
 )
@@ -55,27 +57,7 @@ from .parsers import _parse_word_line
 logger = get_logger(__name__)
 
 
-ADD_FORMAT_MESSAGE = (
-    "Send words, one per line. Fields can be separated by spaces or by | (pipe).\n\n"
-    "<code>n article word plural translation</code>\n"
-    "Example: <code>n die Katze Katzen cat</code>\n"
-    "Or:      <code>n | die | Katze | Katzen | small cat</code>\n\n"
-    "<code>v infinitive partizip_ii translation</code>  (regular)\n"
-    "Example: <code>v machen hat gemacht to do</code>\n"
-    "Or:      <code>v | machen | hat gemacht | to do something</code>\n\n"
-    "<code>vi infinitive partizip_ii ich du er translation</code>  (irregular)\n"
-    "Example: <code>vi fahren ist gefahren fahre faehrst faehrt to drive</code>\n"
-    "Or:      <code>vi | fahren | ist gefahren | fahre | faehrst | faehrt | to drive</code>\n\n"
-    "<code>adj word translation</code>\n"
-    "Example: <code>adj schnell fast</code>\n\n"
-    "<code>adv word translation</code>\n"
-    "Example: <code>adv manchmal sometimes</code>\n\n"
-    "<code>prep word translation</code>  (case info goes in translation)\n"
-    "Example: <code>prep mit with (+dat)</code>\n\n"
-    "Limits: up to 50 lines per batch, 120 characters per word/translation, "
-    "5 tags per word, 32 characters per tag.\n\n"
-    "After parsing, you'll see a preview with Confirm and Cancel buttons."
-)
+ADD_FORMAT_MESSAGE = add_format_message("en")
 
 
 def _clear_add_state(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -83,16 +65,20 @@ def _clear_add_state(context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data.pop(k, None)
 
 
-def _add_cancel_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data=f"{CB_ADD}cancel")]])
+def _add_cancel_keyboard(lang: str = "en") -> InlineKeyboardMarkup:
+    text = "Отмена" if normalize_language(lang) == "ru" else "Cancel"
+    return InlineKeyboardMarkup([[InlineKeyboardButton(text, callback_data=f"{CB_ADD}cancel")]])
 
 
-def _add_confirm_keyboard() -> InlineKeyboardMarkup:
+def _add_confirm_keyboard(lang: str = "en") -> InlineKeyboardMarkup:
+    lang = normalize_language(lang)
+    confirm = "Сохранить" if lang == "ru" else "Confirm"
+    cancel = "Отмена" if lang == "ru" else "Cancel"
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("Confirm", callback_data=f"{CB_ADD}confirm"),
-                InlineKeyboardButton("Cancel", callback_data=f"{CB_ADD}cancel"),
+                InlineKeyboardButton(confirm, callback_data=f"{CB_ADD}confirm"),
+                InlineKeyboardButton(cancel, callback_data=f"{CB_ADD}cancel"),
             ]
         ]
     )
@@ -100,6 +86,7 @@ def _add_confirm_keyboard() -> InlineKeyboardMarkup:
 
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
+    lang = await _get_lang(context, user_id)
     _clear_add_state(context)
 
     tag = ""
@@ -115,17 +102,21 @@ async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     log_user_action(logger, user_id, f"/add tag={_safe_log(tag) or 'none'}")
 
     safe_tag = html.escape(tag)
-    header = f"Adding words with tag <b>#{safe_tag}</b>.\n\n" if tag else ""
+    if lang == "ru":
+        header = f"Добавляем слова с тегом <b>#{safe_tag}</b>.\n\n" if tag else ""
+    else:
+        header = f"Adding words with tag <b>#{safe_tag}</b>.\n\n" if tag else ""
     await update.message.reply_text(
-        header + ADD_FORMAT_MESSAGE,
+        header + add_format_message(lang),
         parse_mode="HTML",
-        reply_markup=_add_cancel_keyboard(),
+        reply_markup=_add_cancel_keyboard(lang),
     )
     return ADD_WORDS
 
 
 async def add_words_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
+    lang = await _get_lang(context, user_id)
     text = update.message.text
     if len(text) > MAX_ADD_MESSAGE_CHARS:
         log_user_warning(
@@ -134,7 +125,12 @@ async def add_words_received(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"/add message too long: len={len(text)}, limit={MAX_ADD_MESSAGE_CHARS}",
         )
         await update.message.reply_text(
-            f"This /add message is too long ({len(text)} characters). "
+            (
+                f"Сообщение /add слишком длинное ({len(text)} символов). "
+                f"Максимум: {MAX_ADD_MESSAGE_CHARS}. Ничего не сохранено; отправь меньший список."
+            )
+            if lang == "ru"
+            else f"This /add message is too long ({len(text)} characters). "
             f"Maximum is {MAX_ADD_MESSAGE_CHARS}. Nothing was saved; send a smaller batch."
         )
         return ADD_WORDS
@@ -147,7 +143,12 @@ async def add_words_received(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"/add batch too large: lines={len(lines)}, limit={MAX_ADD_BATCH_SIZE}",
         )
         await update.message.reply_text(
-            f"This batch has {len(lines)} lines. Maximum is {MAX_ADD_BATCH_SIZE} "
+            (
+                f"В списке {len(lines)} строк. Максимум: {MAX_ADD_BATCH_SIZE} "
+                "слов за один /add. Ничего не сохранено; отправь меньший список."
+            )
+            if lang == "ru"
+            else f"This batch has {len(lines)} lines. Maximum is {MAX_ADD_BATCH_SIZE} "
             "words per /add batch. Nothing was saved; send a smaller batch."
         )
         return ADD_WORDS
@@ -169,58 +170,93 @@ async def add_words_received(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if limit_errors:
         await update.message.reply_text(
-            "Limit exceeded:\n"
+            ("Превышен лимит:\n" if lang == "ru" else "Limit exceeded:\n")
             + "\n".join(f"  - {e}" for e in limit_errors)
-            + "\n\nNothing was saved. Please send a smaller corrected batch.",
+            + (
+                "\n\nНичего не сохранено. Отправь меньший исправленный список."
+                if lang == "ru"
+                else "\n\nNothing was saved. Please send a smaller corrected batch."
+            ),
             parse_mode="HTML",
-            reply_markup=_add_cancel_keyboard(),
+            reply_markup=_add_cancel_keyboard(lang),
         )
         context.user_data.pop("parsed_words", None)
         return ADD_WORDS
 
     if errors:
-        error_text = "Errors found:\n" + "\n".join(f"  - {e}" for e in errors)
+        error_text = ("Найдены ошибки:\n" if lang == "ru" else "Errors found:\n") + "\n".join(
+            f"  - {e}" for e in errors
+        )
         if parsed:
-            error_text += f"\n\n{len(parsed)} valid line(s) ready."
             error_text += (
-                "\n\nFix errors and resend, /skip to preview valid lines only, " "or tap Cancel."
+                f"\n\nГотово корректных строк: {len(parsed)}."
+                if lang == "ru"
+                else f"\n\n{len(parsed)} valid line(s) ready."
+            )
+            error_text += (
+                "\n\nИсправь ошибки и отправь снова, /skip покажет только корректные строки, "
+                "или нажми Отмена."
+                if lang == "ru"
+                else "\n\nFix errors and resend, /skip to preview valid lines only, "
+                "or tap Cancel."
             )
         else:
-            error_text += "\n\nFix errors and resend, or tap Cancel."
+            error_text += (
+                "\n\nИсправь ошибки и отправь снова или нажми Отмена."
+                if lang == "ru"
+                else "\n\nFix errors and resend, or tap Cancel."
+            )
         await update.message.reply_text(
-            error_text, parse_mode="HTML", reply_markup=_add_cancel_keyboard()
+            error_text, parse_mode="HTML", reply_markup=_add_cancel_keyboard(lang)
         )
         context.user_data["parsed_words"] = parsed
         return ADD_WORDS
 
     if not parsed:
         await update.message.reply_text(
-            "No valid words found. Try again or tap Cancel.",
-            reply_markup=_add_cancel_keyboard(),
+            "Корректных слов не найдено. Попробуй снова или нажми Отмена."
+            if lang == "ru"
+            else "No valid words found. Try again or tap Cancel.",
+            reply_markup=_add_cancel_keyboard(lang),
         )
         return ADD_WORDS
 
     context.user_data["parsed_words"] = parsed
-    return await _send_preview(update, parsed)
+    return await _send_preview(update, context, parsed)
 
 
 async def add_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Show preview of the already-parsed valid lines (errors skipped)."""
     parsed = context.user_data.get("parsed_words", [])
+    lang = await _get_lang(context, update.effective_user.id)
     if not parsed:
-        await update.message.reply_text("No valid words to preview. /cancel to abort.")
+        await update.message.reply_text(
+            "Нет корректных слов для предпросмотра. /cancel отменит добавление."
+            if lang == "ru"
+            else "No valid words to preview. /cancel to abort."
+        )
         return ADD_WORDS
-    return await _send_preview(update, parsed)
+    return await _send_preview(update, context, parsed)
 
 
-async def _send_preview(update: Update, parsed: list[dict]) -> int:
+async def _send_preview(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, parsed: list[dict]
+) -> int:
     """Render the preview of parsed words and prompt the user to confirm via buttons."""
-    preview = _format_word_tables(parsed)
+    lang = await _get_lang(context, update.effective_user.id)
+    preview = _format_word_tables(parsed, lang=lang)
+    text = (
+        f"Предпросмотр ({len(parsed)} слов):{preview}\n\n"
+        "Нажми Сохранить, чтобы записать слова, Отмена, чтобы остановиться, "
+        "или отправь другие слова, чтобы заменить этот список."
+        if lang == "ru"
+        else f"Preview ({len(parsed)} word(s)):{preview}\n\n"
+        "Tap Confirm to save, Cancel to abort, or send more words to replace this batch."
+    )
     await update.message.reply_text(
-        f"Preview ({len(parsed)} word(s)):{preview}\n\n"
-        "Tap Confirm to save, Cancel to abort, or send more words to replace this batch.",
+        text,
         parse_mode="HTML",
-        reply_markup=_add_confirm_keyboard(),
+        reply_markup=_add_confirm_keyboard(lang),
     )
     return ADD_CONFIRM
 
@@ -231,12 +267,13 @@ async def add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     await query.answer()
     action = query.data.removeprefix(CB_ADD)
     user_id = update.effective_user.id
+    lang = await _get_lang(context, user_id)
 
     if action == "cancel":
         log_user_action(logger, user_id, "/add cancelled via button")
         _clear_add_state(context)
         await _drop_buttons(query, user_id)
-        await query.message.reply_text("Add cancelled.")
+        await query.message.reply_text("Добавление отменено." if lang == "ru" else "Add cancelled.")
         return ConversationHandler.END
 
     if action == "confirm":
@@ -246,7 +283,11 @@ async def add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         parsed = context.user_data.get("parsed_words", [])
         await _drop_buttons(query, user_id)
         if not parsed:
-            await query.message.reply_text("Nothing to save. Send /add to start over.")
+            await query.message.reply_text(
+                "Нечего сохранять. Отправь /add, чтобы начать заново."
+                if lang == "ru"
+                else "Nothing to save. Send /add to start over."
+            )
             _clear_add_state(context)
             return ConversationHandler.END
         return await _save_words(update, context, parsed, conn, user_id, tag)
@@ -313,18 +354,35 @@ async def _save_words(update, context, parsed, conn, user_id, tag) -> int:
                 "Database error — others may still be saved."
             )
 
+    lang = await _get_lang(context, user_id)
     parts: list[str] = []
     if added:
-        parts.append(f"Added {len(added)} new word(s):{_format_word_tables(added, show_ids=False)}")
+        parts.append(
+            (
+                f"Добавлено новых слов: {len(added)}:"
+                f"{_format_word_tables(added, show_ids=False, lang=lang)}"
+                if lang == "ru"
+                else f"Added {len(added)} new word(s):"
+                f"{_format_word_tables(added, show_ids=False, lang=lang)}"
+            )
+        )
     if merged:
         safe_tag = html.escape(tag)
         parts.append(
-            f"Tag <b>#{safe_tag}</b> added to {len(merged)} existing word(s):"
-            + _format_word_tables(merged, show_ids=False)
+            (
+                f"Тег <b>#{safe_tag}</b> добавлен к существующим словам: {len(merged)}:"
+                if lang == "ru"
+                else f"Tag <b>#{safe_tag}</b> added to {len(merged)} existing word(s):"
+            )
+            + _format_word_tables(merged, show_ids=False, lang=lang)
         )
     if unchanged:
         names = ", ".join(html.escape(w["german"]) for w in unchanged)
-        parts.append(f"Already existed (no change): {names}")
+        parts.append(
+            f"Уже существовали (без изменений): {names}"
+            if lang == "ru"
+            else f"Already existed (no change): {names}"
+        )
 
     markup = None
     if added:
@@ -336,7 +394,11 @@ async def _save_words(update, context, parsed, conn, user_id, tag) -> int:
             [
                 [
                     InlineKeyboardButton(
-                        f"Start learning ({len(ids)})",
+                        (
+                            f"Начать учить ({len(ids)})"
+                            if lang == "ru"
+                            else f"Start learning ({len(ids)})"
+                        ),
                         callback_data=f"{CB_LEARN_BATCH}go",
                     )
                 ]
@@ -344,7 +406,9 @@ async def _save_words(update, context, parsed, conn, user_id, tag) -> int:
         )
 
     if not parts:
-        await update.effective_message.reply_text("No words were saved.")
+        await update.effective_message.reply_text(
+            "Слова не сохранены." if lang == "ru" else "No words were saved."
+        )
     else:
         await update.effective_message.reply_text(
             "\n\n".join(parts), parse_mode="HTML", reply_markup=markup

@@ -14,7 +14,7 @@ import aiosqlite
 from telegram import ReplyKeyboardMarkup
 from telegram.ext import Application, ContextTypes
 
-from bot.database import get_all_reminders, get_learning_overview
+from bot.database import get_all_reminders, get_learning_overview, get_user_language
 from bot.logging_config import get_logger, log_user_error
 from bot.progress import format_learning_overview
 
@@ -62,11 +62,18 @@ async def _reminder_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
     job = context.job
     user_id = job.data["user_id"]
     try:
-        text = REMINDER_MESSAGE
+        lang = "en"
         conn = context.application.bot_data.get("db_conn") if context.application else None
         if conn is not None:
+            lang = await get_user_language(conn, user_id)
+        text = (
+            "Пора позаниматься немецким. Нажми /quiz для повторения или /learn для новых слов."
+            if lang == "ru"
+            else REMINDER_MESSAGE
+        )
+        if conn is not None:
             overview = await get_learning_overview(conn, user_id)
-            text += "\n\n" + format_learning_overview(overview)
+            text += "\n\n" + format_learning_overview(overview, lang=lang)
         await context.bot.send_message(
             chat_id=user_id,
             text=text,

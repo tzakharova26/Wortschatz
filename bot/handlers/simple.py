@@ -7,22 +7,33 @@ import html
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from bot.config import LIST_MAX_WORDS, QUIZ_START_MESSAGE
+from bot.config import LIST_MAX_WORDS
 from bot.database import (
     delete_word,
     find_words_by_german,
     get_tags,
     get_words,
+    set_user_language,
+)
+from bot.i18n import (
+    SUPPORTED_LANGUAGES,
+    add_format_message,
+    commands_help,
+    quiz_start_message,
+    start_message,
+    t,
 )
 from bot.logging_config import get_logger, log_user_action, log_user_error
 from bot.stats import get_user_stats
 
 from ._shared import (
     CB_HELP,
+    CB_LANG,
     CB_OWNER,
     PENDING_DELETE_TTL_S,
     _format_word_tables,
     _get_conn,
+    _get_lang,
     _safe_log,
     pending_pop,
     pending_set,
@@ -34,145 +45,168 @@ logger = get_logger(__name__)
 # Help/start text — kept here because they reference each other and the
 # ADD_FORMAT_MESSAGE constant from /add. The HTML escapes (e.g. &lt;id|all&gt;)
 # are deliberate; without them Telegram rejects the message.
-COMMANDS_HELP = (
-    "<b>Commands:</b>\n"
-    "/add [tag] — add new words (optionally with a tag)\n"
-    "/list tag — list words filtered by tag\n"
-    "/tags — show all your tags\n"
-    "/delete word — delete a word by its German text\n"
-    "/quiz [N] [tag] — start a quiz (N questions, default 7; words repeat if vocab is small)\n"
-    "/learn [N] [tag] — learn new (or Blackout-flagged) words; graduates them into /quiz\n"
-    "/stats — show learning statistics\n"
-    "/remindme HH:MM [tz] — add a daily practice reminder (default Europe/Berlin)\n"
-    "/reminders — list your reminders (Berlin/Moscow times)\n"
-    "/remindoff &lt;id|all&gt; — remove a reminder\n"
-    "/contact — contact the owner or send an anonymous letter\n"
-    "/help — interactive help menu\n"
-    "/cancel — abort an active quiz (partial progress is saved)"
-)
-
-START_MESSAGE = (
-    "Welcome to Wortschatz — your German vocabulary trainer!\n\n"
-    + COMMANDS_HELP
-    + "\n\n"
-    + QUIZ_START_MESSAGE
-)
+COMMANDS_HELP = commands_help("en")
+START_MESSAGE = start_message("en")
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    log_user_action(logger, update.effective_user.id, "/start")
-    await update.message.reply_text(START_MESSAGE, parse_mode="HTML")
+    user_id = update.effective_user.id
+    log_user_action(logger, user_id, "/start")
+    await update.message.reply_text(
+        "Welcome to Wortschatz. Please choose your interface language.\n\n"
+        "Добро пожаловать в Wortschatz. Пожалуйста, выбери язык интерфейса.",
+        reply_markup=_language_keyboard(source="start"),
+    )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    log_user_action(logger, update.effective_user.id, "/help")
+    user_id = update.effective_user.id
+    log_user_action(logger, user_id, "/help")
+    lang = await _get_lang(context, user_id)
     keyboard = [
         [
-            InlineKeyboardButton("Commands", callback_data=f"{CB_HELP}commands"),
-            InlineKeyboardButton("How to add words", callback_data=f"{CB_HELP}add"),
-            InlineKeyboardButton("Learn & quiz", callback_data=f"{CB_HELP}practice"),
-            InlineKeyboardButton("Contact owner", callback_data=f"{CB_OWNER}info"),
-        ]
+            InlineKeyboardButton(t("btn_commands", lang), callback_data=f"{CB_HELP}commands"),
+            InlineKeyboardButton(t("btn_add", lang), callback_data=f"{CB_HELP}add"),
+        ],
+        [
+            InlineKeyboardButton(t("btn_practice", lang), callback_data=f"{CB_HELP}practice"),
+            InlineKeyboardButton(t("btn_contact", lang), callback_data=f"{CB_OWNER}info"),
+            InlineKeyboardButton(t("btn_language", lang), callback_data=f"{CB_LANG}menu"),
+        ],
     ]
     await update.message.reply_text(
-        "What do you need help with?",
+        t("help_prompt", lang),
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
 async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Imported lazily to avoid a circular reference between simple.py and add.py
-    # (add.py owns ADD_FORMAT_MESSAGE; simple.py owns help_callback that shows it).
-    from .add import ADD_FORMAT_MESSAGE
-
     query = update.callback_query
     await query.answer()
+    user_id = update.effective_user.id
+    lang = await _get_lang(context, user_id)
     topic = query.data.removeprefix(CB_HELP)
 
     if query.data and query.data.startswith(CB_OWNER):
         from .contact import _contact_keyboard, _contact_text
 
         await query.edit_message_text(
-            _contact_text(),
+            _contact_text(lang),
             parse_mode="HTML",
-            reply_markup=_contact_keyboard(),
+            reply_markup=_contact_keyboard(lang),
         )
         return
 
     if topic == "commands":
-        text = COMMANDS_HELP
+        text = commands_help(lang)
     elif topic == "add":
-        text = ADD_FORMAT_MESSAGE
+        text = add_format_message(lang)
     elif topic == "practice":
-        text = (
-            "<b>Practice flow: /learn → /quiz</b>\n\n"
-            "Brand-new words go through <b>/learn</b> first (a guided drill), then "
-            "graduate into <b>/quiz</b> for spaced repetition.\n\n"
-            "<b>/learn [N] [tag]</b> — acquisition\n"
-            "Use this for words you've just added. Each word steps through:\n"
-            "  1. See the card  2. Multiple choice  3. Type it\n"
-            "  + article and plural (nouns) or Partizip II and verb forms (verbs)\n"
-            "Steps from different words are interleaved so you don't get stuck on "
-            "one word in a row. Wrong steps get up to two retries. A word "
-            "graduates only after every step is correct.\n"
-            "  <code>/learn</code> — up to 20 not-yet-learned words (min 5)\n"
-            "  <code>/learn 7</code> — explicit size\n"
-            "  <code>/learn animals</code> — filter by tag\n\n"
-            "<b>/quiz [N] [tag]</b> — revision\n"
-            "Use this once you have graduated words. Mixed quiz types pulled from "
-            "due-for-review words:\n"
-            "  - Translate: type the German word\n"
-            "  - Multiple choice: pick the translation\n"
-            "  - Article: pick der/die/das (nouns)\n"
-            "  - Plural: type the plural (nouns)\n"
-            "  - Verb forms: type the asked form (irregular verbs)\n"
-            "If your due-vocabulary is smaller than the requested size, words "
-            "repeat with new quiz types each round.\n"
-            "  <code>/quiz</code> — 7 questions on most-due words\n"
-            "  <code>/quiz 20 animals</code> — 20 questions, filtered\n\n" + QUIZ_START_MESSAGE
-        )
+        text = t("practice_help", lang) + quiz_start_message(lang)
     else:
-        text = "Unknown topic."
+        text = t("unknown_topic", lang)
 
     await query.edit_message_text(text, parse_mode="HTML")
+
+
+def _language_keyboard(source: str | None = None) -> InlineKeyboardMarkup:
+    prefix = f"{CB_LANG}{source}:" if source else CB_LANG
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(label, callback_data=f"{prefix}{code}")
+                for code, label in SUPPORTED_LANGUAGES.items()
+            ]
+        ]
+    )
+
+
+async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    log_user_action(logger, user_id, f"/language {_safe_log(' '.join(context.args or []))}")
+    lang = await _get_lang(context, user_id)
+    if context.args:
+        requested = context.args[0].lower()
+        if requested in ("english", "en"):
+            requested = "en"
+        elif requested in ("russian", "русский", "ru"):
+            requested = "ru"
+        if requested not in SUPPORTED_LANGUAGES:
+            await update.message.reply_text(t("language_invalid", lang))
+            return
+        await set_user_language(_get_conn(context), user_id, requested)
+        context.user_data["language"] = requested
+        await update.message.reply_text(t("language_set", requested))
+        return
+    await update.message.reply_text(t("language_prompt", lang), reply_markup=_language_keyboard())
+
+
+async def language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    current_lang = await _get_lang(context, user_id)
+    action = (query.data or "").removeprefix(CB_LANG)
+    if action == "menu":
+        await query.edit_message_text(
+            t("language_prompt", current_lang),
+            reply_markup=_language_keyboard(),
+        )
+        return
+    from_start = False
+    if action.startswith("start:"):
+        from_start = True
+        action = action.removeprefix("start:")
+    lang = action
+    if lang not in SUPPORTED_LANGUAGES:
+        await query.edit_message_text(t("language_invalid", current_lang))
+        return
+    await set_user_language(_get_conn(context), user_id, lang)
+    context.user_data["language"] = lang
+    if from_start:
+        await query.edit_message_text(start_message(lang), parse_mode="HTML")
+    else:
+        await query.edit_message_text(t("language_set", lang))
 
 
 async def tags_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     log_user_action(logger, user_id, "/tags")
     conn = _get_conn(context)
+    lang = await _get_lang(context, user_id)
     tags = await get_tags(conn, user_id)
     if not tags:
-        await update.message.reply_text("You have no tags yet.")
+        await update.message.reply_text(t("no_tags", lang))
         return
-    await update.message.reply_text("Your tags:\n" + "\n".join(f"  #{t}" for t in tags))
+    await update.message.reply_text(
+        t("your_tags", lang) + "\n" + "\n".join(f"  #{tag}" for tag in tags)
+    )
 
 
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     log_user_action(logger, user_id, f"/list {_safe_log(' '.join(context.args or []))}")
     conn = _get_conn(context)
+    lang = await _get_lang(context, user_id)
 
     if not context.args:
-        await update.message.reply_text(
-            "Please specify a tag: /list tag\nUse /tags to see your tags."
-        )
+        await update.message.reply_text(t("list_need_tag", lang))
         return
 
     tag = context.args[0].lstrip("#")
     words = await get_words(conn, user_id, tag=tag)
     if not words:
-        await update.message.reply_text(f"No words found with tag #{tag}.")
+        await update.message.reply_text(t("list_empty", lang, tag=tag))
         return
 
     total = len(words)
     truncated = total > LIST_MAX_WORDS
     words = words[:LIST_MAX_WORDS]
     safe_tag = html.escape(tag)
-    text = f"Words with tag <b>#{safe_tag}</b> ({total} total):"
-    text += _format_word_tables(words)
+    text = t("list_header", lang, tag=safe_tag, total=total)
+    text += _format_word_tables(words, lang=lang)
     if truncated:
-        text += f"\n\n... and {total - LIST_MAX_WORDS} more."
+        text += f"\n\n{t('list_more', lang, count=total - LIST_MAX_WORDS)}"
 
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -181,27 +215,28 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = update.effective_user.id
     log_user_action(logger, user_id, f"/delete {_safe_log(' '.join(context.args or []))}")
     conn = _get_conn(context)
+    lang = await _get_lang(context, user_id)
 
     # Clear any stale pending_delete from a previous call (also drops it if expired)
     pending_pop(context, "pending_delete")
 
     if not context.args:
-        await update.message.reply_text("Usage: /delete german_word")
+        await update.message.reply_text(t("delete_usage", lang))
         return
 
     german = " ".join(context.args)
     matches = await find_words_by_german(conn, user_id, german)
 
     if not matches:
-        await update.message.reply_text(f"No word '{german}' found in your vocabulary.")
+        await update.message.reply_text(t("delete_not_found", lang, word=german))
         return
 
     if len(matches) > 1:
-        lines = [f"Multiple matches for '{german}':"]
+        lines = [t("delete_multi", lang, word=german)]
         for w in matches:
             pos = w["part_of_speech"]
             lines.append(f"  [{w['id']}] {pos}: {w['german']} — {w['translation']}")
-        lines.append("\nDelete all of them? Use /delete_confirm to confirm.")
+        lines.append("\n" + t("delete_confirm", lang))
         pending_set(context, "pending_delete", [w["id"] for w in matches], ttl=PENDING_DELETE_TTL_S)
         await update.message.reply_text("\n".join(lines))
         return
@@ -209,21 +244,22 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     word = matches[0]
     deleted = await delete_word(conn, user_id, word["id"])
     if deleted:
-        await update.message.reply_text(f"Deleted: {word['german']} — {word['translation']}")
+        await update.message.reply_text(
+            t("delete_done", lang, word=word["german"], translation=word["translation"])
+        )
     else:
-        await update.message.reply_text("Failed to delete word.")
+        await update.message.reply_text(t("delete_failed", lang))
 
 
 async def delete_confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     log_user_action(logger, user_id, "/delete_confirm")
     conn = _get_conn(context)
+    lang = await _get_lang(context, user_id)
 
     pending = pending_pop(context, "pending_delete")
     if not pending:
-        await update.message.reply_text(
-            "Nothing to confirm — your /delete request may have expired. Re-run /delete."
-        )
+        await update.message.reply_text(t("delete_nothing", lang))
         return
 
     count = 0
@@ -231,14 +267,15 @@ async def delete_confirm_command(update: Update, context: ContextTypes.DEFAULT_T
         if await delete_word(conn, user_id, word_id):
             count += 1
 
-    await update.message.reply_text(f"Deleted {count} word(s).")
+    await update.message.reply_text(t("delete_count", lang, count=count))
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     log_user_action(logger, user_id, "/stats")
     conn = _get_conn(context)
-    text = await get_user_stats(conn, user_id)
+    lang = await _get_lang(context, user_id)
+    text = await get_user_stats(conn, user_id, lang=lang)
     await update.message.reply_text(text, parse_mode="HTML")
 
 
@@ -254,7 +291,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if update and update.effective_message:
         try:
             await update.effective_message.reply_text(
-                "Something went wrong, please try again later."
+                t("error_generic", await _get_lang(context, user_id))
             )
         except Exception as e:
             logger.error("Failed to send error message to user: %s", e, extra={"user_id": user_id})

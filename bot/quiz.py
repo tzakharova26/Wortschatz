@@ -12,6 +12,7 @@ from bot.database import (
     parse_irregular_forms,
     upsert_sm2_state,
 )
+from bot.i18n import normalize_language
 from bot.logging_config import get_logger, log_user_action, log_user_error, log_user_warning
 from bot.questions import (
     german_with_article,
@@ -56,6 +57,7 @@ class QuizSession:
     max_questions: int | None = None
     # results aligned with questions: None for misspell (skipped), (quality, correct) otherwise
     results: list[tuple[int, bool] | None] = field(default_factory=list)
+    lang: str = "en"
 
     @property
     def is_finished(self) -> bool:
@@ -96,7 +98,7 @@ class QuizSession:
             )
             return
         quiz_type = select_quiz_type(word)
-        question = generate_question(word, quiz_type, all_words)
+        question = generate_question(word, quiz_type, all_words, lang=self.lang)
         self.questions.append(question)
 
     @property
@@ -187,53 +189,64 @@ def generate_question(
     word: dict,
     quiz_type: str,
     all_words: list[dict],
+    lang: str = "en",
 ) -> QuizQuestion:
     """Generate a single quiz question."""
     if quiz_type == "translate":
-        return _generate_translate(word)
+        return _generate_translate(word, lang)
     elif quiz_type == "multiple_choice":
-        return _generate_multiple_choice(word, all_words)
+        return _generate_multiple_choice(word, all_words, lang)
     elif quiz_type == "article":
-        return _generate_article(word)
+        return _generate_article(word, lang)
     elif quiz_type == "verb_forms":
-        return _generate_verb_forms(word)
+        return _generate_verb_forms(word, lang)
     elif quiz_type == "partizip":
-        return _generate_partizip(word)
+        return _generate_partizip(word, lang)
     elif quiz_type == "plural":
-        return _generate_plural(word)
+        return _generate_plural(word, lang)
     else:
         log_user_warning(
             logger,
             word.get("user_id", 0),
             f"Unknown quiz type '{quiz_type}', falling back to translate",
         )
-        return _generate_translate(word)
+        return _generate_translate(word, lang)
 
 
-def _generate_translate(word: dict) -> QuizQuestion:
+def _generate_translate(word: dict, lang: str = "en") -> QuizQuestion:
     """Translation -> German: show translation, user types German word."""
+    prompt = (
+        f"Переведи на немецкий: {word['translation']}"
+        if normalize_language(lang) == "ru"
+        else f"Translate to German: {word['translation']}"
+    )
     return QuizQuestion(
         word=word,
         quiz_type="translate",
-        prompt=f"Translate to German: {word['translation']}",
+        prompt=prompt,
         options=None,
         correct_answer=german_with_article(word),
     )
 
 
-def _generate_multiple_choice(word: dict, all_words: list[dict]) -> QuizQuestion:
+def _generate_multiple_choice(word: dict, all_words: list[dict], lang: str = "en") -> QuizQuestion:
     """German -> Translation: show German word, pick translation from options."""
     options, correct = multiple_choice_options(word, all_words)
+    prompt = (
+        f"Что значит '{german_with_article(word)}'?"
+        if normalize_language(lang) == "ru"
+        else f"What does '{german_with_article(word)}' mean?"
+    )
     return QuizQuestion(
         word=word,
         quiz_type="multiple_choice",
-        prompt=f"What does '{german_with_article(word)}' mean?",
+        prompt=prompt,
         options=options,
         correct_answer=correct,
     )
 
 
-def _generate_article(word: dict) -> QuizQuestion:
+def _generate_article(word: dict, lang: str = "en") -> QuizQuestion:
     """Article quiz: show noun, pick der/die/das."""
     article = word.get("article")
     if not article:
@@ -243,17 +256,22 @@ def _generate_article(word: dict) -> QuizQuestion:
             f"Article quiz for word '{word['german']}' without article, "
             "falling back to translate",
         )
-        return _generate_translate(word)
+        return _generate_translate(word, lang)
+    prompt = (
+        f"Какой артикль у слова '{word['german']}'?"
+        if normalize_language(lang) == "ru"
+        else f"What is the article for '{word['german']}'?"
+    )
     return QuizQuestion(
         word=word,
         quiz_type="article",
-        prompt=f"What is the article for '{word['german']}'?",
+        prompt=prompt,
         options=["der", "die", "das"],
         correct_answer=article,
     )
 
 
-def _generate_plural(word: dict) -> QuizQuestion:
+def _generate_plural(word: dict, lang: str = "en") -> QuizQuestion:
     """Plural quiz (nouns only): show the singular with article, user types the plural."""
     plural = word.get("plural")
     if not plural or not plural.strip():
@@ -262,21 +280,26 @@ def _generate_plural(word: dict) -> QuizQuestion:
             word.get("user_id", 0),
             f"Plural quiz for '{word['german']}' without plural, falling back to translate",
         )
-        return _generate_translate(word)
+        return _generate_translate(word, lang)
     # Same article-on-display trick as ``learn._build_plural_step``: store the
     # answer with the "die" prefix so feedback/summary lines show the article,
     # while the matcher (``is_correct("plural", ...)``) accepts input either
     # with or without it.
+    prompt = (
+        f"Напиши множественное число для '{german_with_article(word)}'"
+        if normalize_language(lang) == "ru"
+        else f"What is the plural of '{german_with_article(word)}'?"
+    )
     return QuizQuestion(
         word=word,
         quiz_type="plural",
-        prompt=f"What is the plural of '{german_with_article(word)}'?",
+        prompt=prompt,
         options=None,
         correct_answer=f"die {plural}",
     )
 
 
-def _generate_verb_forms(word: dict) -> QuizQuestion:
+def _generate_verb_forms(word: dict, lang: str = "en") -> QuizQuestion:
     """Verb forms quiz: show infinitive, ask for a specific form."""
     forms = parse_irregular_forms(word.get("irregular_forms"))
     if not forms:
@@ -286,7 +309,7 @@ def _generate_verb_forms(word: dict) -> QuizQuestion:
             f"Verb forms quiz for '{word['german']}' without irregular forms, "
             "falling back to translate",
         )
-        return _generate_translate(word)
+        return _generate_translate(word, lang)
 
     form_key = random.choice(list(forms.keys()))  # noqa: S311
     correct = forms[form_key]
@@ -297,19 +320,24 @@ def _generate_verb_forms(word: dict) -> QuizQuestion:
             f"Empty form value for '{form_key}' in word '{word['german']}', "
             "falling back to translate",
         )
-        return _generate_translate(word)
+        return _generate_translate(word, lang)
+    prompt = (
+        f"Напиши форму '{form_key}' для '{word['german']}'"
+        if normalize_language(lang) == "ru"
+        else f"What is the '{form_key}' form of '{word['german']}'?"
+    )
 
     return QuizQuestion(
         word=word,
         quiz_type="verb_forms",
-        prompt=f"What is the '{form_key}' form of '{word['german']}'?",
+        prompt=prompt,
         options=None,
         correct_answer=correct,
         verb_form_key=form_key,
     )
 
 
-def _generate_partizip(word: dict) -> QuizQuestion:
+def _generate_partizip(word: dict, lang: str = "en") -> QuizQuestion:
     """Partizip II quiz: show translation, user types full stored Partizip II."""
     partizip = word.get("partizip_ii")
     if not partizip or not partizip.strip():
@@ -318,11 +346,16 @@ def _generate_partizip(word: dict) -> QuizQuestion:
             word.get("user_id", 0),
             f"Partizip quiz for '{word['german']}' without partizip_ii, falling back to translate",
         )
-        return _generate_translate(word)
+        return _generate_translate(word, lang)
+    prompt = (
+        f"Напиши Partizip II для: {word['translation']}"
+        if normalize_language(lang) == "ru"
+        else f"Type the Partizip II for: {word['translation']}"
+    )
     return QuizQuestion(
         word=word,
         quiz_type="partizip",
-        prompt=f"Type the Partizip II for: {word['translation']}",
+        prompt=prompt,
         options=None,
         correct_answer=partizip,
     )
@@ -335,6 +368,7 @@ def build_quiz_session(
     size: int | None = None,
     now: datetime | None = None,
     temperature: float = QUIZ_TEMPERATURE,
+    lang: str = "en",
 ) -> QuizSession:
     """Build a quiz session of `size` questions.
 
@@ -347,7 +381,7 @@ def build_quiz_session(
 
     if not due_words:
         log_user_action(logger, user_id, "Quiz session created: 0 questions (no due words)")
-        return QuizSession(user_id=user_id, questions=[], max_questions=0)
+        return QuizSession(user_id=user_id, questions=[], max_questions=0, lang=lang)
 
     if size is None:
         size = len(due_words)
@@ -357,7 +391,7 @@ def build_quiz_session(
     for i in range(size):
         word = ordered_words[i % len(ordered_words)]
         quiz_type = select_quiz_type(word, temperature=temperature, now=now)
-        questions.append(generate_question(word, quiz_type, all_words))
+        questions.append(generate_question(word, quiz_type, all_words, lang=lang))
 
     quiz_types_used = [q.quiz_type for q in questions]
     log_user_action(
@@ -368,6 +402,7 @@ def build_quiz_session(
     return QuizSession(
         user_id=user_id,
         questions=questions,
+        lang=lang,
         max_questions=size * MAX_QUIZ_SESSION_MULTIPLIER,
     )
 
@@ -387,7 +422,12 @@ def check_answer(question: QuizQuestion, user_answer: str) -> bool:
 def format_summary(session: QuizSession) -> str:
     """Format the end-of-quiz summary. HTML-safe."""
     correct, total = session.score
-    lines = [f"Quiz complete! {correct}/{total} correct\n"]
+    lang = normalize_language(session.lang)
+    lines = [
+        f"Повторение закончено: {correct}/{total} правильно\n"
+        if lang == "ru"
+        else f"Quiz complete! {correct}/{total} correct\n"
+    ]
     for i, question in enumerate(session.questions):
         if i >= len(session.results):
             break
@@ -405,10 +445,12 @@ def format_summary(session: QuizSession) -> str:
             lines.append(f"{mark} {german_safe} ({form_safe}) — {answer_safe}")
         elif question.quiz_type == "partizip":
             answer_safe = html.escape(question.correct_answer)
-            lines.append(f"{mark} {german_safe} (Partizip II) — {answer_safe}")
+            label = "Partizip II"
+            lines.append(f"{mark} {german_safe} ({label}) — {answer_safe}")
         elif question.quiz_type == "plural":
             answer_safe = html.escape(question.correct_answer)
-            lines.append(f"{mark} {german_safe} (plural) — {answer_safe}")
+            label = "мн. число" if lang == "ru" else "plural"
+            lines.append(f"{mark} {german_safe} ({label}) — {answer_safe}")
         else:
             lines.append(f"{mark} {german_safe} — {translation_safe}")
     return "\n".join(lines)

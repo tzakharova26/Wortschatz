@@ -35,6 +35,7 @@ Wortschatz/
     safety.py          # Safety limits and graceful rejection helpers
     sm2.py             # SM-2 spaced repetition algorithm
     stats.py           # Statistics formatting
+    i18n.py            # English/Russian interface text and language helpers
     umlaut.py          # Umlaut conversion utilities
     config.py          # Quiz session size, temperature, weights, list cap, etc.
     logging_config.py  # Centralized logging setup
@@ -71,7 +72,10 @@ Wortschatz/
 ```
 
 ## User Interface
-- All bot messages are in **English**
+- Bot interface language is user-configurable: English (`en`) or Russian (`ru`)
+- English is the default for users without a saved setting
+- `/language` opens language buttons; `/language en` and `/language ru` set it directly
+- The selected language is stored per Telegram `user_id` in `user_settings.language`
 - Word cards can be in any language pair (German + user's choice)
 - Russian and other UTF-8 translations are fully supported
 - If a user action hits a configured safety bound, the bot must not partially write data. It should stop the operation, show a clear explanation, and log a `WARNING` with `user_id`.
@@ -237,6 +241,7 @@ class QuizSession:
     questions: list[QuizQuestion]
     current_index: int = 0
     results: list[tuple[int, bool] | None]  # (quality_rating, was_correct), or None for misspell
+    lang: str = "en"  # interface language captured at session start
 ```
 
 ### SM-2 Spaced Repetition Algorithm
@@ -263,14 +268,15 @@ demotes the word back into `/learn` and it is not counted as currently learned u
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Welcome message + commands + rating system explanation |
+| `/start` | Bilingual first-run prompt with English/Russian language buttons; after choice, shows localized welcome + commands + rating system explanation |
 | `/help` | Interactive help with topic buttons (Commands / How to add / How quizzes work) |
+| `/language [en\|ru]` | Choose interface language. Without args, shows language buttons. |
 | `/add [tag]` | Interactive: add word cards (batch, one per line). Tag is an optional command argument. |
 | `/list <tag>` | List words filtered by tag. Tag is **required**; truncated to LIST_MAX_WORDS=40. |
 | `/tags` | List all existing tags |
 | `/delete <word>` | Delete a word card by its German text (umlaut-aware). Confirms via `/delete_confirm` if multiple matches. |
 | `/quiz [N] [tag]` | Start a quiz: `N` questions (default 7, capped at QUIZ_MAX_SIZE=50), optional tag filter. Args order-independent. If due words < N, the session cycles through them with new quiz types. **Excludes words still in the `/learn` pool.** |
-| `/learn [N] [tag]` | Massed-drill flow for new (or Blackout-flagged) words. Per word: show card → MC → typed → (article + plural for nouns / Partizip II + two verb forms for verbs where applicable). Correct answers advance silently; wrong answers are folded into the next prompt in the same edited bot message. Wrong steps get up to two retries in the same session, without showing the card again; a word graduates only when all required steps pass. Blackout words are tried before new words but use at most 50% of a normal `/learn` session. Graduation seeds word-level SM-2 with synthetic Good ratings and records learn history per applicable quiz type. Capped at `LEARN_MAX_SIZE=10`. |
+| `/learn [N] [tag]` | Massed-drill flow for new (or Blackout-flagged) words. Per word: show card → MC → typed → (article + plural for nouns / Partizip II + two verb forms for verbs where applicable). Correct answers advance silently; wrong answers are folded into the next prompt in the same edited bot message. Wrong steps get up to two retries in the same session, without showing the card again; a word graduates only when all required steps pass. Blackout words are tried before new words but use at most 50% of a normal `/learn` session. Graduation seeds word-level SM-2 with synthetic Good ratings and records learn history per applicable quiz type. Capped at `LEARN_MAX_SIZE=20`. |
 | `/stats` | Show learning statistics (today / week / month / overall) |
 | `/remindme HH:MM [tz]` | Add a daily quiz reminder. Default timezone is `Europe/Berlin`. Multiple reminders per user supported. |
 | `/reminders` | List user's reminders with each one's source time and Berlin/Moscow equivalents. |
@@ -375,7 +381,23 @@ CREATE TABLE reminders (
 );
 
 CREATE INDEX idx_reminders_user_id ON reminders(user_id);
+
+CREATE TABLE user_settings (
+    user_id INTEGER PRIMARY KEY,
+    language TEXT NOT NULL DEFAULT 'en', -- 'en' or 'ru'
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 ```
+
+## Localization
+- `/start` always shows a bilingual first-run prompt with `English` and `Русский` buttons.
+- Selecting a `/start` language saves the preference and edits the message into the localized welcome text.
+- `/language` can change the saved preference later.
+- `bot/i18n.py` owns supported languages, static text builders, and small helpers such as Russian plural forms.
+- Handlers should call `_get_lang(context, user_id)` and pass `lang` into formatters/session builders.
+- Quiz and learn sessions keep `session.lang` so prompts, feedback, summaries, and misspell repeats stay in the same language.
+- Reminder jobs load the user's language from the DB because they run outside an active Telegram conversation.
+- New user-facing text should be added in both English and Russian.
 
 ## Reminders
 - Multiple reminders per user (no UNIQUE constraint)
@@ -462,10 +484,11 @@ docker compose --profile tools up -d --build db-browser
   - Add metrics export suitable for Grafana dashboards
   - Track command counts, active users, quiz/learn completions, DB size, reminder sends/failures, handler errors, and latency
   - Document local/VPS dashboard setup and safe access through SSH tunnel or reverse proxy auth
-- [ ] Russian language support:
-  - Add localized bot messages, help text, command explanations, and errors
-  - Keep UTF-8 translations fully supported
-  - Decide whether language is global, per-user setting, or inferred from Telegram locale
+- [x] Russian language support:
+  - English/Russian interface text for start/help/add/list/tags/delete/contact/reminders/stats/learn/quiz
+  - Bilingual `/start` language choice with persisted per-user language preference
+  - `/language [en|ru]` command and language buttons
+  - UTF-8 translations remain fully supported
 - [ ] Visual statistics:
   - Add chart/image generation for `/stats` or a dedicated stats command
   - Show last week, month, and year activity plots: quizzes completed, words learned, words added, correct/wrong distribution, and review streak
