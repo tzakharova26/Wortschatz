@@ -317,6 +317,19 @@ class TestQuizConversation:
         session = fake_context.user_data["quiz_session"]
         assert len(session.questions) == 3
 
+    async def test_quiz_start_includes_learning_overview(self, fake_update, fake_context, db):
+        word_id = await add_word(db, 12345, "adj", "schnell", "fast")
+        await add_word(db, 12345, "adj", "neu", "new")
+        await graduate_word(db, word_id)
+
+        upd = fake_update()
+        await quiz_start(upd, fake_context)
+
+        first_call_text = upd.message.reply_text.call_args_list[0].args[0]
+        assert "Ready for a quick review?" in first_call_text
+        assert "ready to practice now" in first_call_text
+        assert "waiting in /learn" in first_call_text
+
     async def test_quiz_size_capped(self, fake_update, fake_context, db):
         """Requested size above QUIZ_MAX_SIZE is capped, with a notice in the start message."""
         word_id = await add_word(db, 12345, "adj", "schnell", "fast")

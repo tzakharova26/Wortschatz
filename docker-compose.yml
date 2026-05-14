@@ -6,5 +6,24 @@ services:
       - bot-data:/app/data
     restart: unless-stopped
 
+  db-browser:
+    build: .
+    command:
+      - sqlite_web
+      - -H
+      - 0.0.0.0
+      - -p
+      - "8080"
+      - -x
+      - -r
+      - /app/data/wortschatz.db
+    volumes:
+      - bot-data:/app/data:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    profiles:
+      - tools
+    restart: "no"
+
 volumes:
   bot-data:

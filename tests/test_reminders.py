@@ -1,9 +1,10 @@
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from bot.database import (
     add_reminder,
+    add_word,
     delete_all_reminders,
     delete_reminder,
     get_all_reminders,
@@ -11,6 +12,7 @@ from bot.database import (
 )
 from bot.reminders import (
     DEFAULT_TZ,
+    _reminder_callback,
     cancel_reminder,
     format_in_zones,
     job_name,
@@ -18,6 +20,7 @@ from bot.reminders import (
     schedule_reminder,
     validate_timezone,
 )
+from tests.helpers import graduate_word
 
 USER_ID = 12345
 
@@ -188,6 +191,27 @@ class TestLoadAllReminders:
         app.job_queue = MagicMock()
         count = await load_all_reminders(app, db)
         assert count == 0
+
+
+class TestReminderCallback:
+    async def test_message_includes_learning_overview(self, db):
+        word_id = await add_word(db, USER_ID, "adj", "schnell", "fast")
+        await add_word(db, USER_ID, "adj", "neu", "new")
+        await graduate_word(db, word_id, user_id=USER_ID)
+
+        context = MagicMock()
+        context.job.data = {"user_id": USER_ID}
+        context.application.bot_data = {"db_conn": db}
+        context.bot.send_message = AsyncMock()
+
+        await _reminder_callback(context)
+
+        call = context.bot.send_message.await_args
+        assert call.kwargs["chat_id"] == USER_ID
+        assert call.kwargs["parse_mode"] == "HTML"
+        text = call.kwargs["text"]
+        assert "Ready to review" in text
+        assert "Waiting to learn" in text
 
 
 class TestJobName:

@@ -284,6 +284,30 @@ class TestGenerateQuestion:
             for opt in q.options:
                 assert opt in same_pos_translations, f"Distractor {opt!r} leaked from another POS"
 
+    def test_multiple_choice_prefers_same_tag_and_pos(self):
+        """Tagged quizzes should exhaust same-tag + same-POS distractors first."""
+        same_tag_same_pos = [
+            _make_word(word_id=1, german="Katze", translation="cat", tags="animals"),
+            _make_word(word_id=2, german="Hund", translation="dog", tags="animals"),
+            _make_word(word_id=3, german="Maus", translation="mouse", tags="animals"),
+            _make_word(word_id=4, german="Vogel", translation="bird", tags="animals"),
+        ]
+        same_pos_other_tag = [
+            _make_word(word_id=10, german="Tisch", translation="table", tags="home"),
+            _make_word(word_id=11, german="Stuhl", translation="chair", tags="home"),
+        ]
+        same_tag_other_pos = [
+            _make_adj(word_id=20) | {"tags": "animals", "translation": "quick"},
+        ]
+        all_words = same_tag_same_pos + same_pos_other_tag + same_tag_other_pos
+        same_tag_same_pos_translations = {w["translation"] for w in same_tag_same_pos}
+
+        for _ in range(50):
+            q = generate_question(same_tag_same_pos[0], "multiple_choice", all_words)
+            assert len(q.options) == 4
+            for opt in q.options:
+                assert opt in same_tag_same_pos_translations
+
     def test_multiple_choice_dedup_translations(self):
         words = [
             _make_word(word_id=1, german="Katze", translation="cat"),
@@ -621,6 +645,17 @@ class TestBuildQuizSession:
         words = [_make_word(word_id=i, german=f"w{i}", translation=f"t{i}") for i in range(5)]
         session = build_quiz_session(user_id=12345, due_words=words, all_words=words, size=3)
         assert len(session.questions) == 3
+
+    def test_due_words_are_weighted_randomized(self, monkeypatch):
+        words = [_make_word(word_id=i, german=f"w{i}", translation=f"t{i}") for i in range(5)]
+
+        def pick_last(population, weights, k):
+            return [population[-1]]
+
+        monkeypatch.setattr(random, "choices", pick_last)
+        session = build_quiz_session(user_id=12345, due_words=words, all_words=words, size=3)
+
+        assert [q.word["id"] for q in session.questions] == [4, 3, 2]
 
     def test_size_larger_than_due_cycles(self):
         """If due_words has 2 entries and size=5, words repeat to fill 5 questions."""

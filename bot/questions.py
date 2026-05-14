@@ -14,6 +14,10 @@ import random
 from bot.umlaut import answers_match
 
 
+def _tag_set(word: dict) -> set[str]:
+    return {tag.strip() for tag in (word.get("tags") or "").split(",") if tag.strip()}
+
+
 def german_with_article(word: dict) -> str:
     """Render 'article german' for nouns with an article, else just the german word."""
     if word.get("part_of_speech") == "n" and word.get("article"):
@@ -24,21 +28,41 @@ def german_with_article(word: dict) -> str:
 def multiple_choice_options(word: dict, all_words: list[dict]) -> tuple[list[str], str]:
     """Build options for a multiple-choice prompt.
 
-    Wrong distractors prefer same-POS words from the user's vocabulary; if
-    fewer than 3 same-POS candidates exist, fall back to other-POS words. The
-    two pools are shuffled independently and concatenated (NOT shuffled
-    together) so same-POS distractors are exhausted first.
+    Wrong distractors prefer words that share at least one tag AND the same
+    POS. If fewer than 3 exist, selection falls back through same-POS words,
+    then same-tag words with a different POS, then the rest of the vocabulary.
+    Pools are shuffled independently and concatenated so the higher-priority
+    candidates are exhausted first.
 
     Returns ``(options, correct_answer)`` where ``correct_answer`` is the
     word's translation. Options are shuffled before return.
     """
     pos = word["part_of_speech"]
     word_id = word["id"]
-    same_pos = [w for w in all_words if w["part_of_speech"] == pos and w["id"] != word_id]
-    other = [w for w in all_words if w["part_of_speech"] != pos and w["id"] != word_id]
-    random.shuffle(same_pos)
-    random.shuffle(other)
-    pool = same_pos + other
+    tags = _tag_set(word)
+    same_tag_same_pos: list[dict] = []
+    same_pos: list[dict] = []
+    same_tag_other_pos: list[dict] = []
+    other: list[dict] = []
+
+    for candidate in all_words:
+        if candidate["id"] == word_id:
+            continue
+        candidate_tags = _tag_set(candidate)
+        shares_tag = bool(tags and candidate_tags.intersection(tags))
+        same_part = candidate["part_of_speech"] == pos
+        if shares_tag and same_part:
+            same_tag_same_pos.append(candidate)
+        elif same_part:
+            same_pos.append(candidate)
+        elif shares_tag:
+            same_tag_other_pos.append(candidate)
+        else:
+            other.append(candidate)
+
+    for candidates in (same_tag_same_pos, same_pos, same_tag_other_pos, other):
+        random.shuffle(candidates)
+    pool = same_tag_same_pos + same_pos + same_tag_other_pos + other
 
     seen = {word["translation"].lower()}
     distractors: list[str] = []

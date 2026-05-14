@@ -17,6 +17,7 @@ import random
 from dataclasses import dataclass, field
 
 from bot.database import (
+    WORD_REVIEW_STATE,
     add_quiz_history,
     get_quiz_types_for_word,
     get_sm2_state,
@@ -320,49 +321,50 @@ def check_answer(step: LearnStep, user_answer: str) -> bool:
 
 
 async def apply_graduations(conn, session: LearnSession) -> int:
-    """For each fully-passed word, seed SM-2 with synthetic Good ratings across
-    all applicable quiz types. Returns the number of graduations.
+    """For each fully-passed word, seed one word-level SM-2 state and history.
+    Returns the number of graduations.
 
-    Atomicity: each per-word, per-quiz-type pair (sm2 upsert + history insert)
-    runs inside a SAVEPOINT, and the whole batch sits inside one transaction
-    with a single final COMMIT. Same shape as ``quiz.apply_results``.
+    Quiz history keeps the actual prompt types for stats/debugging, but the
+    scheduling state is intentionally per word.
     """
     graduated = session.graduated_words()
     user_id = session.user_id
     await conn.execute("BEGIN")
     try:
         for w_idx, word in enumerate(graduated):
-            for qt_idx, qt in enumerate(get_quiz_types_for_word(word)):
-                sp = f"g{w_idx}_{qt_idx}"
-                await conn.execute(f"SAVEPOINT {sp}")
-                try:
-                    row = await get_sm2_state(conn, user_id, word["id"], qt)
-                    new_state = calculate_sm2(sm2_from_db(row, user_id), QUALITY_CORRECT)
-                    await upsert_sm2_state(
+            sp = f"g{w_idx}"
+            await conn.execute(f"SAVEPOINT {sp}")
+            try:
+                row = await get_sm2_state(conn, user_id, word["id"], WORD_REVIEW_STATE)
+                new_state = calculate_sm2(sm2_from_db(row, user_id), QUALITY_CORRECT)
+                await upsert_sm2_state(
+                    conn,
+                    user_id,
+                    word["id"],
+                    WORD_REVIEW_STATE,
+                    new_state.easiness_factor,
+                    new_state.interval,
+                    new_state.repetitions,
+                    new_state.correct_count,
+                    new_state.next_review,
+                    last_quality=QUALITY_CORRECT,
+                    commit=False,
+                )
+                for qt in get_quiz_types_for_word(word):
+                    await add_quiz_history(
                         conn,
                         user_id,
                         word["id"],
                         qt,
-                        new_state.easiness_factor,
-                        new_state.interval,
-                        new_state.repetitions,
-                        new_state.correct_count,
-                        new_state.next_review,
-                        last_quality=QUALITY_CORRECT,
+                        correct=True,
+                        source="learn",
                         commit=False,
                     )
-                    await add_quiz_history(
-                        conn, user_id, word["id"], qt, correct=True, commit=False
-                    )
-                    await conn.execute(f"RELEASE SAVEPOINT {sp}")
-                except Exception:
-                    await conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
-                    await conn.execute(f"RELEASE SAVEPOINT {sp}")
-                    log_user_error(
-                        logger,
-                        user_id,
-                        f"Failed to graduate word_id={word['id']} qt={qt}",
-                    )
+                await conn.execute(f"RELEASE SAVEPOINT {sp}")
+            except Exception:
+                await conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+                await conn.execute(f"RELEASE SAVEPOINT {sp}")
+                log_user_error(logger, user_id, f"Failed to graduate word_id={word['id']}")
         await conn.commit()
     except Exception:
         await conn.rollback()

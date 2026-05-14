@@ -5,6 +5,7 @@ from datetime import datetime
 
 from bot.config import QUIZ_TEMPERATURE, QUIZ_TYPE_WEIGHTS
 from bot.database import (
+    WORD_REVIEW_STATE,
     add_quiz_history,
     get_quiz_types_for_word,
     get_sm2_state,
@@ -126,6 +127,25 @@ def _word_score(word: dict, now: datetime, temperature: float) -> float:
     if temperature <= 0:
         temperature = 0.01
     return (days_since + 1) ** (1 / temperature)
+
+
+def _weighted_word_order(
+    words: list[dict],
+    now: datetime,
+    temperature: float,
+) -> list[dict]:
+    """Return words in weighted-random order, without replacement.
+
+    More-overdue words remain more likely to appear early, but equally due
+    words no longer produce the same session order every time.
+    """
+    remaining = list(words)
+    ordered: list[dict] = []
+    while remaining:
+        weights = [_word_score(w, now, temperature) for w in remaining]
+        index = random.choices(range(len(remaining)), weights=weights, k=1)[0]  # noqa: S311
+        ordered.append(remaining.pop(index))
+    return ordered
 
 
 def select_quiz_type(
@@ -298,9 +318,10 @@ def build_quiz_session(
     if size is None:
         size = len(due_words)
 
+    ordered_words = _weighted_word_order(due_words, now, temperature)
     questions = []
     for i in range(size):
-        word = due_words[i % len(due_words)]
+        word = ordered_words[i % len(ordered_words)]
         quiz_type = select_quiz_type(word, temperature=temperature, now=now)
         questions.append(generate_question(word, quiz_type, all_words))
 
@@ -379,13 +400,13 @@ async def apply_results(conn, session: QuizSession) -> int:
             sp = f"q{i}"
             await conn.execute(f"SAVEPOINT {sp}")
             try:
-                row = await get_sm2_state(conn, user_id, word_id, quiz_type)
+                row = await get_sm2_state(conn, user_id, word_id, WORD_REVIEW_STATE)
                 new_state = calculate_sm2(sm2_from_db(row, user_id), quality)
                 await upsert_sm2_state(
                     conn,
                     user_id,
                     word_id,
-                    quiz_type,
+                    WORD_REVIEW_STATE,
                     new_state.easiness_factor,
                     new_state.interval,
                     new_state.repetitions,

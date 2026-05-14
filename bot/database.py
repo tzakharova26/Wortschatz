@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS quiz_history (
     word_id INTEGER NOT NULL,
     quiz_type TEXT NOT NULL,
     correct INTEGER NOT NULL,
+    source TEXT NOT NULL DEFAULT 'quiz',
     answered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (word_id) REFERENCES words(id) ON DELETE CASCADE
 );
@@ -71,6 +72,8 @@ CREATE INDEX IF NOT EXISTS idx_reminders_user_id ON reminders(user_id);
 
 VALID_PARTS_OF_SPEECH = {"n", "v", "adj", "adv", "prep"}
 VALID_QUIZ_TYPES = {"translate", "multiple_choice", "article", "verb_forms", "plural"}
+WORD_REVIEW_STATE = "word"
+VALID_SM2_TYPES = VALID_QUIZ_TYPES | {WORD_REVIEW_STATE}
 
 # Mapping: part_of_speech -> list of applicable quiz types (always-applicable ones).
 # Per-word extras (verb_forms for irregular verbs, plural for nouns that actually
@@ -190,6 +193,64 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
             "Migration: added sm2_state.last_quality column",
             extra={"user_id": "system"},
         )
+    cursor = await conn.execute("PRAGMA table_info(quiz_history)")
+    history_cols = {row[1] for row in await cursor.fetchall()}
+    if "source" not in history_cols:
+        await conn.execute(
+            "ALTER TABLE quiz_history ADD COLUMN source TEXT NOT NULL DEFAULT 'quiz'"
+        )
+        await conn.execute(
+            """UPDATE quiz_history
+               SET source = 'learn'
+               WHERE correct = 1
+                 AND answered_at = (
+                   SELECT MIN(h2.answered_at)
+                   FROM quiz_history h2
+                   WHERE h2.user_id = quiz_history.user_id
+                     AND h2.word_id = quiz_history.word_id
+                 )"""
+        )
+        logger.info(
+            "Migration: added quiz_history.source column",
+            extra={"user_id": "system"},
+        )
+    await _migrate_word_level_sm2(conn)
+
+
+async def _migrate_word_level_sm2(conn: aiosqlite.Connection) -> None:
+    """Collapse legacy per-quiz SM-2 rows into one canonical row per word.
+
+    Historical quiz_type rows stay in the table for audit/debug compatibility,
+    but all runtime scheduling now reads/writes quiz_type='word'.
+    """
+    await conn.execute(
+        """
+        INSERT INTO sm2_state (
+            user_id, word_id, quiz_type, easiness_factor, interval, repetitions,
+            correct_count, next_review, last_quality
+        )
+        SELECT
+            user_id,
+            word_id,
+            ?,
+            AVG(easiness_factor),
+            MAX(interval),
+            MAX(repetitions),
+            MAX(correct_count),
+            MIN(next_review),
+            MIN(last_quality)
+        FROM sm2_state legacy
+        WHERE quiz_type != ?
+          AND NOT EXISTS (
+            SELECT 1 FROM sm2_state current
+            WHERE current.user_id = legacy.user_id
+              AND current.word_id = legacy.word_id
+              AND current.quiz_type = ?
+        )
+        GROUP BY user_id, word_id
+        """,
+        (WORD_REVIEW_STATE, WORD_REVIEW_STATE, WORD_REVIEW_STATE),
+    )
 
 
 # --- Words ---
@@ -363,6 +424,8 @@ async def get_words_by_pos(
 async def get_sm2_state(
     conn: aiosqlite.Connection, user_id: int, word_id: int, quiz_type: str
 ) -> dict | None:
+    if quiz_type in VALID_QUIZ_TYPES:
+        quiz_type = WORD_REVIEW_STATE
     cursor = await conn.execute(
         """SELECT * FROM sm2_state
            WHERE user_id = ? AND word_id = ? AND quiz_type = ?""",
@@ -392,7 +455,9 @@ async def upsert_sm2_state(
     issues one commit at the end. Default behaviour preserves the per-row
     commit for ad-hoc callers and tests.
     """
-    if quiz_type not in VALID_QUIZ_TYPES:
+    if quiz_type in VALID_QUIZ_TYPES:
+        quiz_type = WORD_REVIEW_STATE
+    if quiz_type not in VALID_SM2_TYPES:
         raise ValueError(f"Invalid quiz_type: {quiz_type!r}")
 
     await conn.execute(
@@ -438,7 +503,10 @@ _NOT_LEARNING_CLAUSE = """
     )
     AND NOT EXISTS (
       SELECT 1 FROM sm2_state sb
-      WHERE sb.word_id = w.id AND sb.user_id = w.user_id AND sb.last_quality = 0
+      WHERE sb.word_id = w.id
+        AND sb.user_id = w.user_id
+        AND sb.quiz_type = 'word'
+        AND sb.last_quality = 0
     )
 """
 
@@ -450,40 +518,51 @@ async def get_due_words(
     user_id: int,
     limit: int = 7,
     tag: str | None = None,
+    now: datetime | None = None,
 ) -> list[dict]:
-    """Get words most due for review. Returns words with earliest next_review first.
+    """Get words due for review. Returns words with earliest due next_review first.
 
     Excludes words in the "needs learning" pool (no quiz history yet, or last
     answer was Blackout) — those belong to /learn.
     """
+    if now is None:
+        now = datetime.now()
+    now_str = now.isoformat()
+
     # Note: f-strings here only interpolate the module-level _NOT_LEARNING_CLAUSE
     # constant, never user input. The S608 lint is a false positive on this shape.
     if tag:
         escaped_tag = _escape_like(tag)
         query = f"""
-            SELECT w.*, MIN(COALESCE(s.next_review, '1970-01-01')) as earliest_review
+            SELECT w.*,
+                   s.next_review as earliest_review
             FROM words w
-            LEFT JOIN sm2_state s ON w.id = s.word_id AND s.user_id = w.user_id
+            JOIN sm2_state s ON w.id = s.word_id AND s.user_id = w.user_id
+                 AND s.quiz_type = ?
+                 AND (s.next_review IS NULL OR s.next_review <= ?)
             WHERE w.user_id = ?
               AND (',' || w.tags || ',') LIKE ? ESCAPE '\\'
               AND {_NOT_LEARNING_CLAUSE}
-            GROUP BY w.id
             ORDER BY earliest_review ASC
             LIMIT ?
         """  # noqa: S608
-        cursor = await conn.execute(query, (user_id, f"%,{escaped_tag},%", limit))
+        cursor = await conn.execute(
+            query, (WORD_REVIEW_STATE, now_str, user_id, f"%,{escaped_tag},%", limit)
+        )
     else:
         query = f"""
-            SELECT w.*, MIN(COALESCE(s.next_review, '1970-01-01')) as earliest_review
+            SELECT w.*,
+                   s.next_review as earliest_review
             FROM words w
-            LEFT JOIN sm2_state s ON w.id = s.word_id AND s.user_id = w.user_id
+            JOIN sm2_state s ON w.id = s.word_id AND s.user_id = w.user_id
+                 AND s.quiz_type = ?
+                 AND (s.next_review IS NULL OR s.next_review <= ?)
             WHERE w.user_id = ?
               AND {_NOT_LEARNING_CLAUSE}
-            GROUP BY w.id
             ORDER BY earliest_review ASC
             LIMIT ?
         """  # noqa: S608
-        cursor = await conn.execute(query, (user_id, limit))
+        cursor = await conn.execute(query, (WORD_REVIEW_STATE, now_str, user_id, limit))
 
     rows = await cursor.fetchall()
     return [dict(row) for row in rows]
@@ -530,6 +609,58 @@ async def get_needs_learning_words(
     return [dict(row) for row in rows]
 
 
+async def get_learning_overview(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    tag: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, int]:
+    """Return compact counts for user-facing progress messages.
+
+    - due_review: graduated words with at least one SM-2 quiz type due now
+    - needs_learning: new or Blackout-demoted words that belong in /learn
+    - review_words: graduated words eligible for /quiz
+    - total_words: all saved words in scope
+    """
+    if now is None:
+        now = datetime.now()
+    now_str = now.isoformat()
+
+    where = ["w.user_id = ?"]
+    params: list = [user_id]
+    if tag:
+        escaped_tag = _escape_like(tag)
+        where.append("(',' || w.tags || ',') LIKE ? ESCAPE '\\'")
+        params.append(f"%,{escaped_tag},%")
+    scope = " AND ".join(where)
+
+    query = f"""
+        SELECT
+          COUNT(*) AS total_words,
+          SUM(CASE WHEN {_NEEDS_LEARNING_CLAUSE} THEN 1 ELSE 0 END) AS needs_learning,
+          SUM(CASE WHEN {_NOT_LEARNING_CLAUSE} THEN 1 ELSE 0 END) AS review_words,
+          SUM(CASE WHEN {_NOT_LEARNING_CLAUSE}
+                    AND EXISTS (
+                      SELECT 1 FROM sm2_state sd
+                      WHERE sd.word_id = w.id
+                        AND sd.user_id = w.user_id
+                        AND sd.quiz_type = 'word'
+                        AND (sd.next_review IS NULL OR sd.next_review <= ?)
+                    )
+                   THEN 1 ELSE 0 END) AS due_review
+        FROM words w
+        WHERE {scope}
+    """  # noqa: S608
+    cursor = await conn.execute(query, (now_str, *params))
+    row = await cursor.fetchone()
+    return {
+        "total_words": row["total_words"] or 0,
+        "needs_learning": row["needs_learning"] or 0,
+        "review_words": row["review_words"] or 0,
+        "due_review": row["due_review"] or 0,
+    }
+
+
 # --- Quiz History ---
 
 
@@ -539,6 +670,7 @@ async def add_quiz_history(
     word_id: int,
     quiz_type: str,
     correct: bool,
+    source: str = "quiz",
     commit: bool = True,
 ) -> None:
     """Append one quiz_history row.
@@ -548,18 +680,20 @@ async def add_quiz_history(
     """
     if quiz_type not in VALID_QUIZ_TYPES:
         raise ValueError(f"Invalid quiz_type: {quiz_type!r}")
+    if source not in {"quiz", "learn"}:
+        raise ValueError(f"Invalid quiz history source: {source!r}")
 
     await conn.execute(
-        """INSERT INTO quiz_history (user_id, word_id, quiz_type, correct)
-           VALUES (?, ?, ?, ?)""",
-        (user_id, word_id, quiz_type, 1 if correct else 0),
+        """INSERT INTO quiz_history (user_id, word_id, quiz_type, correct, source)
+           VALUES (?, ?, ?, ?, ?)""",
+        (user_id, word_id, quiz_type, 1 if correct else 0, source),
     )
     if commit:
         await conn.commit()
     log_user_action(
         logger,
         user_id,
-        f"Quiz answer: word_id={word_id}, type={quiz_type}, correct={correct}",
+        f"Quiz answer: word_id={word_id}, type={quiz_type}, correct={correct}, source={source}",
     )
 
 
@@ -583,7 +717,9 @@ async def get_stats(conn: aiosqlite.Connection, user_id: int, since: datetime) -
 
     # Quizzes completed
     cursor = await conn.execute(
-        "SELECT COUNT(*) as cnt FROM quiz_history WHERE user_id = ? AND answered_at >= ?",
+        """SELECT COUNT(*) as cnt
+           FROM quiz_history
+           WHERE user_id = ? AND answered_at >= ? AND source = 'quiz'""",
         (user_id, since_str),
     )
     row = await cursor.fetchone()
@@ -597,51 +733,31 @@ async def get_stats(conn: aiosqlite.Connection, user_id: int, since: datetime) -
     row = await cursor.fetchone()
     words_added = row["cnt"]
 
-    # Words learned IN PERIOD: a word "becomes learned" the moment its slowest
-    # applicable quiz_type hits its 4th correct answer. Count words whose
-    # "learned at" timestamp falls within the period.
-    #
-    # One window-function query gets the 4th-correct timestamp for every
-    # (word, quiz_type) pair across all the user's words. The previous
-    # implementation ran an indexed SELECT per (word × quiz_type) — O(N×M)
-    # round-trips that scaled poorly past a few hundred words.
+    # Words learned IN PERIOD: in user-facing stats, "learned" means the word
+    # graduated from /learn into the normal /quiz pool. Graduation writes the
+    # word's first quiz_history rows, so the earliest history timestamp is the
+    # durable marker we currently have.
     cursor = await conn.execute(
-        "SELECT id, part_of_speech, article, plural, irregular_forms "
-        "FROM words WHERE user_id = ?",
-        (user_id,),
-    )
-    word_rows = await cursor.fetchall()
-
-    cursor = await conn.execute(
-        """SELECT word_id, quiz_type, answered_at AS fourth_at
+        """SELECT COUNT(*) AS cnt
            FROM (
-               SELECT word_id, quiz_type, answered_at,
-                      ROW_NUMBER() OVER (
-                          PARTITION BY word_id, quiz_type
-                          ORDER BY answered_at
-                      ) AS rn
-               FROM quiz_history
-               WHERE user_id = ? AND correct = 1
-           ) t
-           WHERE rn = 4""",
-        (user_id,),
+               SELECT h.word_id, MIN(h.answered_at) AS learned_at
+               FROM quiz_history h
+               JOIN words w ON w.id = h.word_id AND w.user_id = h.user_id
+               WHERE h.user_id = ? AND h.source = 'learn'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM sm2_state s
+                   WHERE s.word_id = w.id
+                     AND s.user_id = w.user_id
+                     AND s.quiz_type = 'word'
+                     AND s.last_quality = 0
+                 )
+               GROUP BY h.word_id
+               HAVING learned_at >= ?
+           ) learned""",
+        (user_id, since_str),
     )
-    fourth_rows = await cursor.fetchall()
-
-    fourth_by_word: dict[int, dict[str, str]] = {}
-    for r in fourth_rows:
-        fourth_by_word.setdefault(r["word_id"], {})[r["quiz_type"]] = r["fourth_at"]
-
-    words_learned = 0
-    for r in word_rows:
-        word_dict = dict(r)
-        applicable = set(get_quiz_types_for_word(word_dict))
-        per_type = fourth_by_word.get(word_dict["id"], {})
-        if not applicable.issubset(per_type):
-            continue
-        learned_at = max(per_type[qt] for qt in applicable)
-        if learned_at >= since_str:
-            words_learned += 1
+    row = await cursor.fetchone()
+    words_learned = row["cnt"]
 
     return {
         "quizzes_completed": quizzes_completed,

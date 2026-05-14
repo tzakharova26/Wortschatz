@@ -12,6 +12,7 @@ from bot.database import (
     find_words_by_german,
     get_connection,
     get_due_words,
+    get_learning_overview,
     get_quiz_types_for_word,
     get_sm2_state,
     get_stats,
@@ -399,6 +400,34 @@ class TestDueWords:
         assert w_ok in ids
         assert w_bad not in ids
 
+    async def test_excludes_words_scheduled_for_future(self, db):
+        """SM-2 next_review is a real due filter, not just sort metadata."""
+        due_word = await add_word(db, USER_ID, "adj", "schnell", "fast")
+        future_word = await add_word(db, USER_ID, "adj", "langsam", "slow")
+        now = datetime(2026, 5, 14, 12, 0)
+
+        for wid, next_review in (
+            (due_word, now - timedelta(days=1)),
+            (future_word, now + timedelta(days=1)),
+        ):
+            await add_quiz_history(db, USER_ID, wid, "translate", True)
+            await upsert_sm2_state(
+                db,
+                USER_ID,
+                wid,
+                "translate",
+                easiness_factor=2.5,
+                interval=1,
+                repetitions=1,
+                correct_count=1,
+                next_review=next_review,
+                last_quality=4,
+            )
+
+        due = await get_due_words(db, USER_ID, limit=7, now=now)
+        assert [w["id"] for w in due] == [due_word]
+        assert due[0]["earliest_review"] == (now - timedelta(days=1)).isoformat()
+
     async def test_respects_limit(self, db):
         from tests.helpers import graduate_word
 
@@ -469,10 +498,10 @@ class TestStats:
         """Helper: add 4 correct quiz_history entries for each quiz_type."""
         for qt in quiz_types:
             for _ in range(4):
-                await add_quiz_history(db, USER_ID, word_id, qt, True)
+                await add_quiz_history(db, USER_ID, word_id, qt, True, source="learn")
 
     async def test_word_learned_all_types(self, db):
-        """Adjective needs translate + multiple_choice both at 4 to be learned."""
+        """A word counts as learned when it first graduates into quiz_history."""
         word_id = await add_word(db, USER_ID, "adj", "schnell", "fast")
         await self._mark_learned(db, word_id, ["translate", "multiple_choice"])
 
@@ -481,23 +510,16 @@ class TestStats:
         assert stats["words_learned"] == 1
 
     async def test_word_not_learned_partial(self, db):
-        """Adjective with only translate at 4 is NOT learned (missing multiple_choice)."""
+        """Stats learned tracks /learn graduation, not mastery of all quiz types."""
         word_id = await add_word(db, USER_ID, "adj", "schnell", "fast")
         await self._mark_learned(db, word_id, ["translate"])
 
         since = datetime.now(timezone.utc) - timedelta(days=1)
         stats = await get_stats(db, USER_ID, since)
-        assert stats["words_learned"] == 0
+        assert stats["words_learned"] == 1
 
     async def test_noun_learned_needs_all_types(self, db):
-        """Noun with a plural needs translate + multiple_choice + article + plural all at 4.
-
-        (The previous /stats had a bug: it didn't SELECT ``plural`` from the
-        words table, so ``get_quiz_types_for_word`` never appended ``plural``
-        to the applicable set, and a noun could be flagged "learned" without
-        passing its plural quiz. The aggregate rewrite surfaces this — the
-        applicable set now correctly includes plural when present.)
-        """
+        """Noun graduation counts once, even though graduation writes all quiz types."""
         word_id = await add_word(db, USER_ID, "n", "Katze", "cat", article="die", plural="Katzen")
         await self._mark_learned(db, word_id, ["translate", "multiple_choice", "article", "plural"])
 
@@ -506,23 +528,22 @@ class TestStats:
         assert stats["words_learned"] == 1
 
     async def test_noun_not_learned_missing_article(self, db):
-        """Noun with translate + multiple_choice at 4 but no article is NOT learned."""
+        """A graduated noun counts even if later mastery of article is incomplete."""
         word_id = await add_word(db, USER_ID, "n", "Katze", "cat", article="die", plural="Katzen")
         await self._mark_learned(db, word_id, ["translate", "multiple_choice"])
 
         since = datetime.now(timezone.utc) - timedelta(days=1)
         stats = await get_stats(db, USER_ID, since)
-        assert stats["words_learned"] == 0
+        assert stats["words_learned"] == 1
 
     async def test_noun_not_learned_missing_plural(self, db):
-        """Noun with article but no plural quiz at 4 is NOT learned (regression for bug
-        where plural quiz type was silently dropped from the applicable set)."""
+        """Stats learned is based on graduation, not the plural mastery threshold."""
         word_id = await add_word(db, USER_ID, "n", "Katze", "cat", article="die", plural="Katzen")
         await self._mark_learned(db, word_id, ["translate", "multiple_choice", "article"])
 
         since = datetime.now(timezone.utc) - timedelta(days=1)
         stats = await get_stats(db, USER_ID, since)
-        assert stats["words_learned"] == 0
+        assert stats["words_learned"] == 1
 
     async def test_noun_no_plural_skips_plural_requirement(self, db):
         """Noun without a plural (e.g. 'Milch') only needs translate + MC + article."""
@@ -567,10 +588,96 @@ class TestStats:
         stats = await get_stats(db, USER_ID, since)
         assert stats["words_learned"] == 0
 
-        # Period is "all time" \u2014 SHOULD count
+        # Period is "all time" — SHOULD count
         epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
         stats = await get_stats(db, USER_ID, epoch)
         assert stats["words_learned"] == 1
+
+
+class TestLearningOverview:
+    async def test_counts_due_review_and_needs_learning(self, db):
+        due_word = await add_word(db, USER_ID, "adj", "schnell", "fast")
+        future_word = await add_word(db, USER_ID, "adj", "langsam", "slow")
+        await add_word(db, USER_ID, "adj", "neu", "new")
+
+        now = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc).replace(tzinfo=None)
+        await add_quiz_history(db, USER_ID, due_word, "translate", True)
+        await upsert_sm2_state(
+            db,
+            USER_ID,
+            due_word,
+            "translate",
+            easiness_factor=2.5,
+            interval=1,
+            repetitions=1,
+            correct_count=1,
+            next_review=now - timedelta(days=1),
+            last_quality=4,
+        )
+        await add_quiz_history(db, USER_ID, future_word, "translate", True)
+        await upsert_sm2_state(
+            db,
+            USER_ID,
+            future_word,
+            "translate",
+            easiness_factor=2.5,
+            interval=1,
+            repetitions=1,
+            correct_count=1,
+            next_review=now + timedelta(days=1),
+            last_quality=4,
+        )
+
+        overview = await get_learning_overview(db, USER_ID, now=now)
+        assert overview == {
+            "total_words": 3,
+            "needs_learning": 1,
+            "review_words": 2,
+            "due_review": 1,
+        }
+
+    async def test_sm2_without_history_is_not_learned(self, db):
+        """SM-2 rows alone do not mark graduation; /learn writes quiz_history."""
+        word_id = await add_word(db, USER_ID, "adj", "schnell", "fast")
+        next_review = datetime.now(timezone.utc)
+        for qt in ("translate", "multiple_choice"):
+            await upsert_sm2_state(
+                db,
+                USER_ID,
+                word_id,
+                qt,
+                easiness_factor=2.5,
+                interval=6,
+                repetitions=4,
+                correct_count=4,
+                next_review=next_review,
+                last_quality=4,
+            )
+
+        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        stats = await get_stats(db, USER_ID, epoch)
+        assert stats["words_learned"] == 0
+
+    async def test_blackout_word_not_counted_as_currently_learned(self, db):
+        """A Blackout-demoted word returns to /learn and drops out of learned stats."""
+        word_id = await add_word(db, USER_ID, "adj", "schnell", "fast")
+        await add_quiz_history(db, USER_ID, word_id, "translate", True)
+        await upsert_sm2_state(
+            db,
+            USER_ID,
+            word_id,
+            "translate",
+            easiness_factor=2.5,
+            interval=0,
+            repetitions=0,
+            correct_count=1,
+            next_review=datetime.now(timezone.utc),
+            last_quality=0,
+        )
+
+        since = datetime.now(timezone.utc) - timedelta(days=1)
+        stats = await get_stats(db, USER_ID, since)
+        assert stats["words_learned"] == 0
 
 
 class TestGetConnection:

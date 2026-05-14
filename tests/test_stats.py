@@ -13,6 +13,7 @@ class TestGetUserStats:
         assert "This week" in text
         assert "This month" in text
         assert "Overall" in text
+        assert "Learning queue" in text
         assert "Quizzes: 0" in text
 
     async def test_with_data(self, db):
@@ -55,6 +56,8 @@ class TestGetUserStats:
         word_id = await add_word(db, USER_ID, "adj", "schnell", "fast")
         for qt in ("translate", "multiple_choice"):
             for _ in range(4):
-                await add_quiz_history(db, USER_ID, word_id, qt, True)
+                await add_quiz_history(db, USER_ID, word_id, qt, True, source="learn")
         text = await get_user_stats(db, USER_ID)
         assert "Words learned: 1" in text
+        assert "Ready to review" in text
+        assert "Waiting to learn" in text

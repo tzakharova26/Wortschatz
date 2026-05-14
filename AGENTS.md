@@ -46,7 +46,7 @@ Wortschatz/
   pyproject.toml       # ruff + pytest config
   Dockerfile
   docker-compose.yml
-  CLAUDE.md
+  AGENTS.md
   README.md
 ```
 

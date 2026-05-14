@@ -37,6 +37,39 @@ python3 -m venv .venv
 docker compose up -d --build
 ```
 
+## Database Browser
+
+Start a read-only SQLite web UI when you need to inspect the bot database:
+
+```bash
+docker compose --profile tools up -d --build db-browser
+```
+
+The browser listens only on the host loopback interface:
+
+```text
+http://127.0.0.1:8080
+```
+
+If the bot runs on a VPS, connect from your laptop with an SSH tunnel:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 <user>@<server>
+```
+
+Then open `http://127.0.0.1:8080` locally. Useful tables:
+
+- `words` — vocabulary cards, parts of speech, tags
+- `sm2_state` — spaced-repetition state and `correct_count`
+- `quiz_history` — answer history
+- `reminders` — reminder times and timezones
+
+Stop the browser when done:
+
+```bash
+docker compose --profile tools stop db-browser
+```
+
 ## Commands
 
 | Command | Description |

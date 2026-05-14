@@ -3,7 +3,8 @@ from zoneinfo import ZoneInfo
 
 import aiosqlite
 
-from bot.database import get_stats
+from bot.database import get_learning_overview, get_stats
+from bot.progress import format_stats_queue
 from bot.reminders import DEFAULT_TZ
 
 # Anchor "today / week / month" to the bot's default user timezone (Europe/Berlin).
@@ -24,6 +25,7 @@ async def get_user_stats(conn: aiosqlite.Connection, user_id: int) -> str:
     week_stats = await get_stats(conn, user_id, week_ago)
     month_stats = await get_stats(conn, user_id, month_ago)
     total_stats = await get_stats(conn, user_id, epoch)
+    overview = await get_learning_overview(conn, user_id)
 
     def _fmt(s: dict) -> str:
         return (
@@ -34,6 +36,7 @@ async def get_user_stats(conn: aiosqlite.Connection, user_id: int) -> str:
 
     return (
         "<b>Your Statistics</b>\n\n"
+        f"{format_stats_queue(overview)}\n\n"
         f"<b>Today:</b>\n{_fmt(today_stats)}\n\n"
         f"<b>This week:</b>\n{_fmt(week_stats)}\n\n"
         f"<b>This month:</b>\n{_fmt(month_stats)}\n\n"

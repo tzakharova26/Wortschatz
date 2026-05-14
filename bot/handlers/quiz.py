@@ -23,8 +23,14 @@ from bot.config import (
     QUIZ_SESSION_SIZE,
     QUIZ_START_MESSAGE,
 )
-from bot.database import get_due_words, get_needs_learning_words, get_words_by_pos
+from bot.database import (
+    get_due_words,
+    get_learning_overview,
+    get_needs_learning_words,
+    get_words_by_pos,
+)
 from bot.logging_config import get_logger, log_user_action, log_user_warning
+from bot.progress import format_quiz_intro
 from bot.quiz import apply_results, build_quiz_session, check_answer, format_summary
 
 from ._shared import (
@@ -39,6 +45,8 @@ from ._shared import (
 )
 
 logger = get_logger(__name__)
+
+QUIZ_SELECTION_POOL_MULTIPLIER = 4
 
 
 def _clear_quiz_state(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -110,17 +118,23 @@ async def quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     size = requested_size if requested_size is not None else QUIZ_SESSION_SIZE
     log_user_action(logger, user_id, f"/quiz size={size} tag={_safe_log(tag) if tag else 'all'}")
 
-    # Fetch up to `size` most-due words; if user has fewer, build_quiz_session cycles.
-    due_words = await get_due_words(conn, user_id, limit=size, tag=tag)
+    # Pull a wider pool than the final session size. If we ask the DB for only
+    # `size` rows, the same oldest-due words can dominate every default quiz
+    # and recently graduated /learn words may not appear for a long time.
+    pool_limit = min(QUIZ_MAX_SIZE, max(size * QUIZ_SELECTION_POOL_MULTIPLIER, size))
+    due_words = await get_due_words(conn, user_id, limit=pool_limit, tag=tag)
     if not due_words:
         # Distinguish "user has no words yet" from "user has words but none are
         # graduated yet" — the second case should point at /learn, not /add.
         unlearned = await get_needs_learning_words(conn, user_id, limit=1, tag=tag)
-        msg = "No words to quiz on."
+        overview = await get_learning_overview(conn, user_id, tag=tag)
+        msg = "No words are due for /quiz right now."
         if tag:
             msg += f" (tag: #{tag})"
         if unlearned:
-            msg += " You have words that haven't graduated yet — use /learn first."
+            msg += f" {overview['needs_learning']} word(s) are waiting in /learn."
+        elif overview["review_words"]:
+            msg += " Your review words are scheduled for later by SM-2."
         else:
             msg += " Add some words first with /add."
         await update.message.reply_text(msg)
@@ -135,7 +149,8 @@ async def quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data["quiz_session"] = session
     context.user_data["quiz_all_words"] = all_user_words
 
-    intro = QUIZ_START_MESSAGE
+    overview = await get_learning_overview(conn, user_id, tag=tag)
+    intro = format_quiz_intro(overview, tag=tag) + "\n\n" + QUIZ_START_MESSAGE
     if capped:
         intro = f"(Capped to {QUIZ_MAX_SIZE} questions.)\n\n" + intro
     if len(due_words) < size:
