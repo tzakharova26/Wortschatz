@@ -3,7 +3,7 @@ import random
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from bot.config import QUIZ_TEMPERATURE, QUIZ_TYPE_WEIGHTS
+from bot.config import MAX_QUIZ_SESSION_MULTIPLIER, QUIZ_TEMPERATURE, QUIZ_TYPE_WEIGHTS
 from bot.database import (
     WORD_REVIEW_STATE,
     add_quiz_history,
@@ -53,6 +53,7 @@ class QuizSession:
     user_id: int
     questions: list[QuizQuestion]
     current_index: int = 0
+    max_questions: int | None = None
     # results aligned with questions: None for misspell (skipped), (quality, correct) otherwise
     results: list[tuple[int, bool] | None] = field(default_factory=list)
 
@@ -86,9 +87,21 @@ class QuizSession:
 
     def add_misspell_question(self, word: dict, all_words: list[dict]) -> None:
         """Re-add a word with a freshly selected quiz type at the end."""
+        if self.max_questions is not None and len(self.questions) >= self.max_questions:
+            log_user_warning(
+                logger,
+                self.user_id,
+                f"Misspell repeat limit reached: questions={len(self.questions)}, "
+                f"limit={self.max_questions}",
+            )
+            return
         quiz_type = select_quiz_type(word)
         question = generate_question(word, quiz_type, all_words)
         self.questions.append(question)
+
+    @property
+    def can_add_misspell_question(self) -> bool:
+        return self.max_questions is None or len(self.questions) < self.max_questions
 
     @property
     def score(self) -> tuple[int, int]:
@@ -334,7 +347,7 @@ def build_quiz_session(
 
     if not due_words:
         log_user_action(logger, user_id, "Quiz session created: 0 questions (no due words)")
-        return QuizSession(user_id=user_id, questions=[])
+        return QuizSession(user_id=user_id, questions=[], max_questions=0)
 
     if size is None:
         size = len(due_words)
@@ -352,7 +365,11 @@ def build_quiz_session(
         user_id,
         f"Quiz session created: {len(questions)} questions, types={quiz_types_used}",
     )
-    return QuizSession(user_id=user_id, questions=questions)
+    return QuizSession(
+        user_id=user_id,
+        questions=questions,
+        max_questions=size * MAX_QUIZ_SESSION_MULTIPLIER,
+    )
 
 
 def check_answer(question: QuizQuestion, user_answer: str) -> bool:

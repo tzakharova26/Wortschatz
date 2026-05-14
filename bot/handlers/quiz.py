@@ -39,6 +39,7 @@ from bot.quiz import (
     format_summary,
     german_with_article,
 )
+from bot.safety import LimitExceeded, ensure_db_size_allows_write
 
 from ._shared import (
     CB_ART,
@@ -82,7 +83,10 @@ def _build_question_markup(q) -> InlineKeyboardMarkup | None:
     """Build the inline keyboard for a question, or None for typed answers."""
     if q.quiz_type == "multiple_choice" and q.options:
         return InlineKeyboardMarkup(
-            [[InlineKeyboardButton(opt, callback_data=f"{CB_MC}{opt}")] for opt in q.options]
+            [
+                [InlineKeyboardButton(opt, callback_data=f"{CB_MC}{idx}")]
+                for idx, opt in enumerate(q.options)
+            ]
         )
     if q.quiz_type == "article" and q.options:
         return InlineKeyboardMarkup(
@@ -152,6 +156,12 @@ async def quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     size = requested_size if requested_size is not None else QUIZ_SESSION_SIZE
     log_user_action(logger, user_id, f"/quiz size={size} tag={_safe_log(tag) if tag else 'all'}")
+    try:
+        await ensure_db_size_allows_write(conn, user_id)
+    except LimitExceeded as e:
+        log_user_warning(logger, user_id, e.log_message)
+        await update.message.reply_text(e.user_message)
+        return ConversationHandler.END
 
     # Pull a wider pool than the final session size. If we ask the DB for only
     # `size` rows, the same oldest-due words can dominate every default quiz
@@ -277,7 +287,16 @@ async def quiz_button_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     q = session.current_question
     if query.data.startswith(CB_MC):
-        user_answer = query.data.removeprefix(CB_MC)
+        raw = query.data.removeprefix(CB_MC)
+        if raw.isdigit() and q.options:
+            idx = int(raw)
+            if idx >= len(q.options):
+                log_user_warning(logger, session.user_id, f"Invalid MC option index: {raw}")
+                return QUIZ_ANSWERING
+            user_answer = q.options[idx]
+        else:
+            # Legacy callback shape from messages sent before callback data was shortened.
+            user_answer = raw
     elif query.data.startswith(CB_ART):
         user_answer = query.data.removeprefix(CB_ART)
     else:
@@ -312,6 +331,20 @@ async def quiz_rating(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     if rate_data == "misspell":
         q = session.current_question
+        if not session.can_add_misspell_question:
+            limit = session.max_questions or len(session.questions)
+            log_user_warning(
+                logger,
+                session.user_id,
+                f"Misspell repeat limit hit in handler: questions={len(session.questions)}, "
+                f"limit={limit}",
+            )
+            await query.edit_message_text(
+                "This quiz has reached the repeat limit. Please choose Good, Easy, "
+                "Wrong, or Blackout instead.",
+                reply_markup=_rating_keyboard(correct),
+            )
+            return QUIZ_RATING
         all_words = context.user_data.get("quiz_all_words", [])
         session.add_misspell_question(q.word, all_words)
         session.record_misspell()
@@ -334,10 +367,20 @@ async def quiz_rating(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 async def _finish_quiz(query, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Finish quiz: show summary, update SM-2 and history."""
     session = context.user_data["quiz_session"]
-    failures = await apply_results(_get_conn(context), session)
+    conn = _get_conn(context)
+    limit_message: str | None = None
+    try:
+        await ensure_db_size_allows_write(conn, session.user_id)
+        failures = await apply_results(conn, session)
+    except LimitExceeded as e:
+        log_user_warning(logger, session.user_id, e.log_message)
+        failures = 0
+        limit_message = e.user_message
 
     summary = format_summary(session)
-    if failures:
+    if limit_message:
+        summary += f"\n\n{html.escape(limit_message)}"
+    elif failures:
         summary += f"\n\n(Note: {failures} result(s) could not be saved due to a database error.)"
     await _edit_or_reply_session_message(context, "quiz_message", query.message, summary)
 
@@ -357,11 +400,20 @@ async def quiz_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     log_user_action(logger, user_id, f"Quiz cancelled (rated={rated})")
 
     if session and rated > 0:
-        failures = await apply_results(_get_conn(context), session)
+        conn = _get_conn(context)
         summary = format_summary(session)
-        msg = "Quiz cancelled. Partial progress saved.\n\n" + summary
-        if failures:
-            msg += f"\n\n(Note: {failures} result(s) could not be saved due to a database error.)"
+        try:
+            await ensure_db_size_allows_write(conn, user_id)
+            failures = await apply_results(conn, session)
+            msg = "Quiz cancelled. Partial progress saved.\n\n" + summary
+            if failures:
+                msg += (
+                    f"\n\n(Note: {failures} result(s) could not be saved due to "
+                    "a database error.)"
+                )
+        except LimitExceeded as e:
+            log_user_warning(logger, user_id, e.log_message)
+            msg = "Quiz cancelled.\n\n" + e.user_message
         await update.message.reply_text(msg, parse_mode="HTML")
     else:
         await update.message.reply_text("Quiz cancelled.")

@@ -31,6 +31,7 @@ Wortschatz/
     questions.py       # Shared question/answer helpers
     progress.py        # Learning queue / reminder text formatting
     reminders.py       # Reminder scheduling and timezone helpers
+    safety.py          # Safety limits and graceful rejection helpers
     sm2.py             # SM-2 spaced repetition algorithm
     stats.py           # Statistics formatting
     umlaut.py          # Umlaut conversion utilities
@@ -71,6 +72,7 @@ Wortschatz/
 - All bot messages are in **English**
 - Word cards can be in any language pair (German + user's choice)
 - Russian and other UTF-8 translations are fully supported
+- If a user action hits a configured safety bound, the bot must not partially write data. It should stop the operation, show a clear explanation, and log a `WARNING` with `user_id`.
 
 ## Word Card Model
 
@@ -282,6 +284,31 @@ demotes the word back into `/learn` and it is not counted as currently learned u
   - Words learned (graduated from `/learn` in that period)
 - Overall totals
 
+## Safety Limits
+Configured in `bot/config.py` and enforced before writes where applicable:
+
+| Limit | Value | Behavior |
+|-------|-------|----------|
+| `MAX_USERS` | 10 | New users beyond this cannot create persisted data |
+| `MAX_WORDS_PER_USER` | 5000 | `/add` batch is rejected before saving if it would exceed the cap |
+| `MAX_ADD_BATCH_SIZE` | 50 lines | Oversized `/add` message is rejected before parsing/saving |
+| `MAX_ADD_MESSAGE_CHARS` | 8000 | Oversized `/add` text is rejected |
+| `MAX_GERMAN_LENGTH` | 120 chars | German fields, plurals, Partizip II, and forms are rejected if too long |
+| `MAX_TRANSLATION_LENGTH` | 120 chars | Long translations are rejected |
+| `MAX_TAGS_PER_WORD` | 5 | Adding/merging a tag is rejected if the word would exceed this |
+| `MAX_TAGS_PER_USER` | 100 | New tag creation is rejected when the user already has 100 tags |
+| `MAX_TAG_LENGTH` | 32 chars | Too-long tags are rejected |
+| `MAX_REMINDERS_PER_USER` | 10 | Extra reminders are rejected before DB insert |
+| `LEARN_MAX_SIZE` | 20 | `/learn` request size is capped |
+| `QUIZ_MAX_SIZE` | 50 | `/quiz` request size is capped |
+| `MAX_QUIZ_SESSION_MULTIPLIER` | 2 | Misspell repeats cannot grow a quiz above twice its initial length |
+| `DB_SIZE_WARNING_MB` | 100 MB | Write-intended commands log a warning but continue |
+| `DB_SIZE_HARD_LIMIT_MB` | 500 MB | Write-intended commands are rejected before saving |
+
+Callback data must stay short. Do not put arbitrary translations or user text into Telegram
+callback payloads; use indexes/ids and resolve them from session state. Telegram callback data
+has a small byte limit and long user text can break inline buttons.
+
 ## Database Schema (SQLite)
 
 ```sql
@@ -415,4 +442,20 @@ docker compose --profile tools up -d --build db-browser
 - [x] Configurable quiz size (`/quiz [N] [tag]`) with cycling for small vocabularies
 - [x] Daily reminders with multi-timezone support (`/remindme`, `/reminders`, `/remindoff`)
 - [x] Learning flow (`/learn`): massed drill for brand-new and Blackout-flagged words; graduates into `/quiz` via synthetic Good rating; post-`/add` "Start learning" button; `last_quality` column on `sm2_state`
+- [x] Safety limits and constraints:
+  - Explicit caps for max users, max words per user, max tags per word/user, max reminders per user, max `/add` batch size, max quiz/learn session sizes, and DB size
+  - Validation and user-facing messages for cap violations
+  - Warning logs for cap violations and DB size warning threshold
+- [ ] Observability and Grafana:
+  - Add metrics export suitable for Grafana dashboards
+  - Track command counts, active users, quiz/learn completions, DB size, reminder sends/failures, handler errors, and latency
+  - Document local/VPS dashboard setup and safe access through SSH tunnel or reverse proxy auth
+- [ ] Russian language support:
+  - Add localized bot messages, help text, command explanations, and errors
+  - Keep UTF-8 translations fully supported
+  - Decide whether language is global, per-user setting, or inferred from Telegram locale
+- [ ] Visual statistics:
+  - Add chart/image generation for `/stats` or a dedicated stats command
+  - Show last week, month, and year activity plots: quizzes completed, words learned, words added, correct/wrong distribution, and review streak
+  - Prefer generated PNG charts sent by Telegram; keep textual stats as fallback
 - [ ] AI-powered features (context sentences, grammar tips, smart corrections)

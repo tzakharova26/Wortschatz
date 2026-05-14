@@ -120,6 +120,26 @@ Umlaut matching is directional:
 
 This lets the user type quickly on any keyboard without making the checker too permissive.
 
+## Safety Limits
+
+The bot is configured for a small personal deployment, so it has explicit bounds. If a command hits a bound, the bot explains what happened, logs a warning, and avoids partial writes.
+
+Current limits:
+
+- 10 users with persisted data
+- 5000 words per user
+- 50 lines per `/add` batch
+- 8000 characters per `/add` message
+- 120 characters per German field or translation
+- 5 tags per word
+- 100 tags per user
+- 32 characters per tag
+- 10 reminders per user
+- `/learn` capped at 20 words
+- `/quiz` capped at 50 questions
+- misspell repeats capped at twice the initial quiz length
+- database size warning at 100 MB, hard write stop at 500 MB
+
 ## Tech Stack
 
 - Python 3.11+
@@ -139,6 +159,7 @@ bot/
   database.py          SQLite schema, migrations, and queries
   learn.py             /learn session logic
   quiz.py              /quiz question generation and result application
+  safety.py            safety limits and graceful rejection helpers
   sm2.py               spaced repetition algorithm
   questions.py         shared answer matching and MC option helpers
   reminders.py         reminder scheduling

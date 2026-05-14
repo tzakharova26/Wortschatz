@@ -25,6 +25,7 @@ from bot import learn as learn_core
 from bot.config import LEARN_MAX_SIZE, LEARN_MIN_SIZE, LEARN_START_MESSAGE
 from bot.database import get_needs_learning_words, get_words_by_pos
 from bot.logging_config import get_logger, log_user_action, log_user_error, log_user_warning
+from bot.safety import LimitExceeded, ensure_db_size_allows_write
 
 from ._shared import (
     CB_LEARN_ART,
@@ -56,7 +57,10 @@ def _build_learn_step_markup(step) -> InlineKeyboardMarkup | None:
         )
     if step.step_type == learn_core.MC and step.options:
         return InlineKeyboardMarkup(
-            [[InlineKeyboardButton(o, callback_data=f"{CB_LEARN_MC}{o}")] for o in step.options]
+            [
+                [InlineKeyboardButton(o, callback_data=f"{CB_LEARN_MC}{idx}")]
+                for idx, o in enumerate(step.options)
+            ]
         )
     if step.step_type == learn_core.ARTICLE and step.options:
         return InlineKeyboardMarkup(
@@ -168,6 +172,13 @@ async def learn_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     log_user_action(logger, user_id, f"/learn size={size} tag={_safe_log(tag) if tag else 'all'}")
 
     conn = _get_conn(context)
+    try:
+        await ensure_db_size_allows_write(conn, user_id)
+    except LimitExceeded as e:
+        log_user_warning(logger, user_id, e.log_message)
+        await update.message.reply_text(e.user_message)
+        return ConversationHandler.END
+
     old_limit = size // 2
     blackout_words = await get_needs_learning_words(
         conn,
@@ -208,6 +219,13 @@ async def learn_batch_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
 
     conn = _get_conn(context)
+    try:
+        await ensure_db_size_allows_write(conn, user_id)
+    except LimitExceeded as e:
+        log_user_warning(logger, user_id, e.log_message)
+        await query.message.reply_text(e.user_message)
+        return ConversationHandler.END
+
     # Restrict to ids that are still in the needs-learning pool.
     words = await get_needs_learning_words(conn, user_id, word_ids=word_ids)
     return await _start_learn_session(update, context, user_id, words, query.message)
@@ -234,7 +252,16 @@ async def learn_button_answer(update: Update, context: ContextTypes.DEFAULT_TYPE
         session.record_step(correct=True)
     elif data.startswith(CB_LEARN_MC) or data.startswith(CB_LEARN_ART):
         prefix = CB_LEARN_MC if data.startswith(CB_LEARN_MC) else CB_LEARN_ART
-        user_answer = data.removeprefix(prefix)
+        raw_answer = data.removeprefix(prefix)
+        if prefix == CB_LEARN_MC and raw_answer.isdigit() and step.options:
+            idx = int(raw_answer)
+            if idx >= len(step.options):
+                log_user_warning(logger, session.user_id, f"Invalid learn MC index: {raw_answer}")
+                return LEARN_ANSWERING
+            user_answer = step.options[idx]
+        else:
+            # Legacy callback shape from messages sent before callback data was shortened.
+            user_answer = raw_answer
         correct = learn_core.check_answer(step, user_answer)
         session.record_step(correct=correct)
         if not correct:
@@ -290,7 +317,13 @@ async def _finish_learn(reply_target, context: ContextTypes.DEFAULT_TYPE) -> int
     session: learn_core.LearnSession = context.user_data["learn_session"]
     conn = _get_conn(context)
     try:
+        await ensure_db_size_allows_write(conn, session.user_id)
         graduated = await learn_core.apply_graduations(conn, session)
+        limit_message = None
+    except LimitExceeded as e:
+        log_user_warning(logger, session.user_id, e.log_message)
+        graduated = -1
+        limit_message = e.user_message
     except Exception as e:
         log_user_error(
             logger,
@@ -299,9 +332,12 @@ async def _finish_learn(reply_target, context: ContextTypes.DEFAULT_TYPE) -> int
             exc_info=e,
         )
         graduated = -1
+        limit_message = None
 
     summary = learn_core.format_summary(session)
-    if graduated == -1:
+    if graduated == -1 and limit_message:
+        summary += f"\n\n{html.escape(limit_message)}"
+    elif graduated == -1:
         summary += "\n\n(Note: some graduations could not be saved due to a database error.)"
     await _edit_or_reply_session_message(
         context,
@@ -327,13 +363,18 @@ async def learn_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     log_user_action(logger, user_id, "Learn cancelled")
 
     if session and session.graduated_words():
+        conn = _get_conn(context)
         try:
-            await learn_core.apply_graduations(_get_conn(context), session)
+            await ensure_db_size_allows_write(conn, user_id)
+            await learn_core.apply_graduations(conn, session)
             summary = learn_core.format_summary(session)
             await update.message.reply_text(
                 "Learning cancelled. Partial progress saved.\n\n" + summary,
                 parse_mode="HTML",
             )
+        except LimitExceeded as e:
+            log_user_warning(logger, user_id, e.log_message)
+            await update.message.reply_text("Learning cancelled.\n\n" + e.user_message)
         except Exception as e:
             log_user_error(logger, user_id, f"Failed to save partial graduations: {e}", exc_info=e)
             await update.message.reply_text("Learning cancelled.")

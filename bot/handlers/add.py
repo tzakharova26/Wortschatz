@@ -14,13 +14,29 @@ from telegram.ext import (
     filters,
 )
 
+from bot.config import (
+    MAX_ADD_BATCH_SIZE,
+    MAX_ADD_MESSAGE_CHARS,
+    MAX_WORDS_PER_USER,
+)
 from bot.database import (
     add_word,
+    count_words,
     find_word_by_german_pos,
+    get_tags,
     merge_tag,
     update_word_tags,
 )
 from bot.logging_config import get_logger, log_user_action, log_user_error, log_user_warning
+from bot.safety import (
+    LimitExceeded,
+    ensure_db_size_allows_write,
+    ensure_user_allowed,
+    ensure_user_tag_capacity,
+    validate_single_tag,
+    validate_tags_per_word,
+    validate_word_lengths,
+)
 
 from ._shared import (
     ADD_CONFIRM,
@@ -56,6 +72,8 @@ ADD_FORMAT_MESSAGE = (
     "Example: <code>adv manchmal sometimes</code>\n\n"
     "<code>prep word translation</code>  (case info goes in translation)\n"
     "Example: <code>prep mit with (+dat)</code>\n\n"
+    "Limits: up to 50 lines per batch, 120 characters per word/translation, "
+    "5 tags per word, 32 characters per tag.\n\n"
     "After parsing, you'll see a preview with Confirm and Cancel buttons."
 )
 
@@ -87,6 +105,12 @@ async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     tag = ""
     if context.args:
         tag = context.args[0].lstrip("#")
+    try:
+        validate_single_tag(tag)
+    except LimitExceeded as e:
+        log_user_warning(logger, user_id, e.log_message)
+        await update.message.reply_text(e.user_message)
+        return ConversationHandler.END
     context.user_data["add_tag"] = tag
     log_user_action(logger, user_id, f"/add tag={_safe_log(tag) or 'none'}")
 
@@ -101,16 +125,58 @@ async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def add_words_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
     text = update.message.text
+    if len(text) > MAX_ADD_MESSAGE_CHARS:
+        log_user_warning(
+            logger,
+            user_id,
+            f"/add message too long: len={len(text)}, limit={MAX_ADD_MESSAGE_CHARS}",
+        )
+        await update.message.reply_text(
+            f"This /add message is too long ({len(text)} characters). "
+            f"Maximum is {MAX_ADD_MESSAGE_CHARS}. Nothing was saved; send a smaller batch."
+        )
+        return ADD_WORDS
+
+    lines = [line for line in text.strip().split("\n") if line.strip()]
+    if len(lines) > MAX_ADD_BATCH_SIZE:
+        log_user_warning(
+            logger,
+            user_id,
+            f"/add batch too large: lines={len(lines)}, limit={MAX_ADD_BATCH_SIZE}",
+        )
+        await update.message.reply_text(
+            f"This batch has {len(lines)} lines. Maximum is {MAX_ADD_BATCH_SIZE} "
+            "words per /add batch. Nothing was saved; send a smaller batch."
+        )
+        return ADD_WORDS
 
     parsed = []
     errors = []
-    for line in text.strip().split("\n"):
+    limit_errors = []
+    for line in lines:
         word_dict, error = _parse_word_line(line)
         if error:
             errors.append(error)
         elif word_dict:
-            parsed.append(word_dict)
+            try:
+                validate_word_lengths(word_dict)
+                parsed.append(word_dict)
+            except LimitExceeded as e:
+                log_user_warning(logger, user_id, e.log_message)
+                limit_errors.append(e.user_message)
+
+    if limit_errors:
+        await update.message.reply_text(
+            "Limit exceeded:\n"
+            + "\n".join(f"  - {e}" for e in limit_errors)
+            + "\n\nNothing was saved. Please send a smaller corrected batch.",
+            parse_mode="HTML",
+            reply_markup=_add_cancel_keyboard(),
+        )
+        context.user_data.pop("parsed_words", None)
+        return ADD_WORDS
 
     if errors:
         error_text = "Errors found:\n" + "\n".join(f"  - {e}" for e in errors)
@@ -192,6 +258,14 @@ async def add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 async def _save_words(update, context, parsed, conn, user_id, tag) -> int:
     """Save parsed words. If a word with same (german, POS) already exists,
     merge the new tag into its existing tags instead of creating a duplicate row."""
+    try:
+        await _validate_save_limits(conn, user_id, parsed, tag)
+    except LimitExceeded as e:
+        log_user_warning(logger, user_id, e.log_message)
+        await update.effective_message.reply_text(e.user_message)
+        _clear_add_state(context)
+        return ConversationHandler.END
+
     added = []  # newly inserted
     merged = []  # existing word, tag added
     unchanged = []  # existing word, tag already present (or no tag given)
@@ -278,6 +352,43 @@ async def _save_words(update, context, parsed, conn, user_id, tag) -> int:
 
     _clear_add_state(context)
     return ConversationHandler.END
+
+
+async def _validate_save_limits(conn, user_id: int, parsed: list[dict], tag: str) -> None:
+    await ensure_db_size_allows_write(conn, user_id)
+    await ensure_user_allowed(conn, user_id)
+    validate_single_tag(tag)
+
+    current_words = await count_words(conn, user_id)
+    new_word_count = 0
+    existing_user_tags = set()
+    if tag:
+        existing_user_tags = set(await get_tags(conn, user_id))
+
+    for word in parsed:
+        validate_word_lengths(word)
+        existing = await find_word_by_german_pos(
+            conn,
+            user_id,
+            word["german"],
+            word["part_of_speech"],
+        )
+        if existing is None:
+            new_word_count += 1
+            validate_tags_per_word("", tag)
+        else:
+            validate_tags_per_word(existing["tags"], tag)
+
+    if current_words + new_word_count > MAX_WORDS_PER_USER:
+        raise LimitExceeded(
+            f"You already have {current_words} word(s). This batch would add "
+            f"{new_word_count}, exceeding the limit of {MAX_WORDS_PER_USER} words per user. "
+            "Nothing was saved.",
+            f"Max words per user exceeded: current={current_words}, adding={new_word_count}, "
+            f"limit={MAX_WORDS_PER_USER}",
+        )
+
+    await ensure_user_tag_capacity(conn, user_id, existing_user_tags, tag)
 
 
 def get_add_conversation() -> ConversationHandler:

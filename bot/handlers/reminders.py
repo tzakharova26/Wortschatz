@@ -7,13 +7,15 @@ import html
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from bot.config import MAX_REMINDERS_PER_USER
 from bot.database import (
     add_reminder,
+    count_reminders,
     delete_all_reminders,
     delete_reminder,
     get_reminders,
 )
-from bot.logging_config import get_logger, log_user_action, log_user_error
+from bot.logging_config import get_logger, log_user_action, log_user_error, log_user_warning
 from bot.reminders import (
     DEFAULT_TZ,
     cancel_reminder,
@@ -21,6 +23,7 @@ from bot.reminders import (
     schedule_reminder,
     validate_timezone,
 )
+from bot.safety import LimitExceeded, ensure_db_size_allows_write, ensure_user_allowed
 
 from ._shared import _get_conn, _safe_log
 
@@ -69,7 +72,21 @@ async def remindme_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     hour, minute, tz = parsed
 
     try:
+        await ensure_db_size_allows_write(conn, user_id)
+        await ensure_user_allowed(conn, user_id)
+        current_reminders = await count_reminders(conn, user_id)
+        if current_reminders >= MAX_REMINDERS_PER_USER:
+            raise LimitExceeded(
+                f"You already have {current_reminders} reminder(s). The limit is "
+                f"{MAX_REMINDERS_PER_USER}, so this reminder was not saved.",
+                f"Max reminders per user exceeded: current={current_reminders}, "
+                f"limit={MAX_REMINDERS_PER_USER}",
+            )
         reminder_id = await add_reminder(conn, user_id, hour, minute, tz)
+    except LimitExceeded as e:
+        log_user_warning(logger, user_id, e.log_message)
+        await update.message.reply_text(e.user_message)
+        return
     except Exception as e:
         log_user_error(logger, user_id, f"Failed to add reminder: {e}", exc_info=e)
         await update.message.reply_text("Could not save reminder, please try again.")

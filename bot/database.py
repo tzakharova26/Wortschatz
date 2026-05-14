@@ -341,6 +341,66 @@ async def get_words(conn: aiosqlite.Connection, user_id: int, tag: str | None = 
     return [dict(row) for row in rows]
 
 
+async def count_words(conn: aiosqlite.Connection, user_id: int) -> int:
+    cursor = await conn.execute("SELECT COUNT(*) AS cnt FROM words WHERE user_id = ?", (user_id,))
+    row = await cursor.fetchone()
+    return row["cnt"] or 0
+
+
+async def count_known_users(conn: aiosqlite.Connection) -> int:
+    """Count distinct users that have persisted data in any user-owned table."""
+    cursor = await conn.execute(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM (
+            SELECT user_id FROM words
+            UNION
+            SELECT user_id FROM sm2_state
+            UNION
+            SELECT user_id FROM quiz_history
+            UNION
+            SELECT user_id FROM reminders
+        ) users
+        """
+    )
+    row = await cursor.fetchone()
+    return row["cnt"] or 0
+
+
+async def user_has_persisted_data(conn: aiosqlite.Connection, user_id: int) -> bool:
+    cursor = await conn.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM words WHERE user_id = ?
+            UNION
+            SELECT 1 FROM sm2_state WHERE user_id = ?
+            UNION
+            SELECT 1 FROM quiz_history WHERE user_id = ?
+            UNION
+            SELECT 1 FROM reminders WHERE user_id = ?
+        ) AS exists_flag
+        """,
+        (user_id, user_id, user_id, user_id),
+    )
+    row = await cursor.fetchone()
+    return bool(row["exists_flag"])
+
+
+async def count_user_tags(conn: aiosqlite.Connection, user_id: int) -> int:
+    cursor = await conn.execute(
+        "SELECT tags FROM words WHERE user_id = ? AND tags != ''",
+        (user_id,),
+    )
+    rows = await cursor.fetchall()
+    tag_set: set[str] = set()
+    for row in rows:
+        for tag in row["tags"].split(","):
+            tag = tag.strip()
+            if tag:
+                tag_set.add(tag)
+    return len(tag_set)
+
+
 async def get_word_by_id(conn: aiosqlite.Connection, word_id: int, user_id: int) -> dict | None:
     cursor = await conn.execute(
         "SELECT * FROM words WHERE id = ? AND user_id = ?", (word_id, user_id)
@@ -413,6 +473,15 @@ async def get_tags(conn: aiosqlite.Connection, user_id: int) -> list[str]:
             if t:
                 tag_set.add(t)
     return sorted(tag_set)
+
+
+async def count_reminders(conn: aiosqlite.Connection, user_id: int) -> int:
+    cursor = await conn.execute(
+        "SELECT COUNT(*) AS cnt FROM reminders WHERE user_id = ?",
+        (user_id,),
+    )
+    row = await cursor.fetchone()
+    return row["cnt"] or 0
 
 
 # --- Words by part of speech (for quiz options) ---
