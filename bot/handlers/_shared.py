@@ -18,6 +18,7 @@ from telegram.ext import ContextTypes
 from bot.database import get_user_language, parse_irregular_forms
 from bot.i18n import DEFAULT_LANGUAGE, normalize_language
 from bot.logging_config import get_logger
+from bot.questions import stored_verb_forms_for_questions, verb_form_label
 
 logger = get_logger(__name__)
 
@@ -136,12 +137,13 @@ def _format_word_tables(words: list[dict], show_ids: bool = True, lang: str = "e
         "adj": "Прилагательные" if lang == "ru" else "Adjectives",
         "adv": "Наречия" if lang == "ru" else "Adverbs",
         "prep": "Предлоги" if lang == "ru" else "Prepositions",
+        "phrase": "Фразы и сочетания" if lang == "ru" else "Phrases and collocations",
     }
 
     def esc(s) -> str:
         return html.escape(str(s)) if s is not None else ""
 
-    for pos in ["n", "v", "adj", "adv", "prep"]:
+    for pos in ["n", "v", "adj", "adv", "prep", "phrase"]:
         if pos not in groups:
             continue
         lines.append(f"\n<b>{pos_labels.get(pos, pos)}:</b>")
@@ -155,13 +157,15 @@ def _format_word_tables(words: list[dict], show_ids: bool = True, lang: str = "e
                 plural = esc(w.get("plural")) or "—"
                 lines.append(f"  {id_prefix}{article} {german} (pl: {plural}) — {translation}")
             elif pos == "v":
-                partizip = esc(w.get("partizip_ii")) or "—"
                 forms_str = ""
                 forms = parse_irregular_forms(w.get("irregular_forms"))
                 if forms:
-                    form_parts = [f"{esc(k)}: {esc(v)}" for k, v in forms.items()]
+                    form_parts = [
+                        f"{esc(verb_form_label(k))}: {esc(v)}"
+                        for k, v in stored_verb_forms_for_questions(forms).items()
+                    ]
                     forms_str = f" ({', '.join(form_parts)})"
-                lines.append(f"  {id_prefix}{german} [{partizip}]{forms_str} — {translation}")
+                lines.append(f"  {id_prefix}{german}{forms_str} — {translation}")
             else:
                 lines.append(f"  {id_prefix}{german} — {translation}")
 

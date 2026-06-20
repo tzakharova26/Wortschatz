@@ -26,6 +26,7 @@ from bot.handlers import (
     start_command,
     stats_command,
     tags_command,
+    today_command,
 )
 from bot.logging_config import get_logger, setup_logging
 from bot.reminders import load_all_reminders
@@ -80,6 +81,7 @@ def main() -> None:
     app.add_handler(CommandHandler("delete", delete_command))
     app.add_handler(CommandHandler("delete_confirm", delete_confirm_command))
     app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("today", today_command))
     app.add_handler(CommandHandler("health", health_command))
     app.add_handler(CommandHandler("remindme", remindme_command))
     app.add_handler(CommandHandler("reminders", reminders_command))

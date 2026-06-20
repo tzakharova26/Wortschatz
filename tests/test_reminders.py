@@ -195,6 +195,10 @@ class TestLoadAllReminders:
 
 
 class TestReminderCallback:
+    def test_reminder_keyboard_includes_practice_commands(self):
+        buttons = REMINDER_KEYBOARD.keyboard[0]
+        assert [button.text for button in buttons] == ["/add", "/quiz", "/verbs", "/learn"]
+
     async def test_message_includes_learning_overview(self, db):
         word_id = await add_word(db, USER_ID, "adj", "schnell", "fast")
         await add_word(db, USER_ID, "adj", "neu", "new")
@@ -211,8 +215,6 @@ class TestReminderCallback:
         assert call.kwargs["chat_id"] == USER_ID
         assert call.kwargs["parse_mode"] == "HTML"
         assert call.kwargs["reply_markup"] == REMINDER_KEYBOARD
-        buttons = call.kwargs["reply_markup"].keyboard[0]
-        assert [button.text for button in buttons] == ["/add", "/quiz", "/learn"]
         text = call.kwargs["text"]
         assert "Ready to review" in text
         assert "Waiting to learn" in text

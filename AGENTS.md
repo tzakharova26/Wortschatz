@@ -103,20 +103,24 @@ n <article> <word> <plural> <translation>
 ```
 Example: `n die Katze Katzen cat`
 
+Use `-` in the plural field for nouns without a normal plural form:
+`n das Geld - money` or `n | die | Bildung | - | education`. Store this as no
+plural (`NULL`/empty) so `/learn` and `/quiz` skip plural questions.
+
 **Verbs -- regular (v):**
 ```
-v <infinitive> <partizip_ii> <translation>
+v <infinitive> <translation>
 ```
-Example: `v machen hat gemacht to do`
+Example: `v machen to do`
 
-**Verbs -- irregular present (vi):**
+**Verbs -- with stored irregularities (v):**
 ```
-vi <infinitive> <partizip_ii> <ich> <du> <er/sie/es> <translation>
+v | <infinitive> | p=<Partizip II> | pr=<Präteritum> | du=<form> | er=<form> | <translation>
 ```
-Example: `vi fahren ist gefahren fahre faehrst faehrt to drive`
-Stored as JSON in `irregular_forms`: `{"ich": "fahre", "du": "fährst", "er": "fährt"}`
+Example: `v | bringen | p=hat gebracht | pr=brachte | to bring`
+Stored as JSON in `irregular_forms`: `{"partizip_ii": "hat gebracht", "preteritum": "brachte"}`
 
-The `vi` marker (instead of `v`) disambiguates irregular verbs from regular ones with multi-word translations like `v gehen ist gegangen to walk on foot`.
+Short form keys: `p` = `partizip_ii`, `pr` = `preteritum`, plus person keys such as `ich`, `du`, `er`. Person-specific Präteritum is optional and uses `pr_ich`, `pr_du`, `pr_er`, `pr_wir`, `pr_ihr`, `pr_sie`, stored as `preteritum_ich`, `preteritum_du`, etc. Pipe-separated input is recommended when a form contains spaces. Legacy `vi <infinitive> <partizip_ii> <ich> <du> <er> <translation>` is still accepted and normalized into `irregular_forms`.
 
 **Adjectives (adj):**
 ```
@@ -136,6 +140,14 @@ prep <word> <translation>
 ```
 Example: `prep mit with (+dat)` — case info goes in the translation field.
 
+**Phrases and collocations (phrase / phr):**
+```
+phrase <single-token-expression> <translation>
+phr | <expression> | <translation>
+```
+Examples: `phrase morgens in the morning`, `phr | auf jeden Fall | in any case`.
+Use pipe-separated input for multi-word German expressions or multi-word translations.
+
 ### Field Separator
 Each `/add` line can use **spaces** or **`|` (pipe)** as field separators (auto-detected per line). Pipe is recommended when translations contain spaces or for readability:
 ```
@@ -144,12 +156,13 @@ vi | fahren | ist gefahren | fahre | faehrst | faehrt | to drive
 ```
 
 ### Input Validation
-- `part_of_speech` (input markers) is one of: `n`, `v`, `vi`, `adj`, `adv`, `prep` (`vi` is parsed as irregular `v` and stored as `v`)
-- Stored `part_of_speech` is one of: `n`, `v`, `adj`, `adv`, `prep`
+- `part_of_speech` (input markers) is one of: `n`, `v`, `vi`, `adj`, `adv`, `prep`, `phrase`, `phr` (`vi` is parsed as irregular `v` and stored as `v`; `phr` is stored as `phrase`)
+- Stored `part_of_speech` is one of: `n`, `v`, `adj`, `adv`, `prep`, `phrase`
 - `german` and `translation` cannot be empty or whitespace-only
 - All inputs are stripped of leading/trailing whitespace
 - Tags are normalized: whitespace stripped, empty segments removed
-- `quiz_type` must be one of: `translate`, `multiple_choice`, `article`, `verb_forms`, `plural`, `partizip`
+- `quiz_type` must be one of: `translate`, `multiple_choice`, `article`, `verb_forms`, `adjective_example`, `plural`
+- Re-adding an existing word merges non-conflicting new `irregular_forms` keys and tags into the existing card. If any provided form key conflicts with an existing different value, skip that word entirely for that `/add` confirmation and list it under form conflicts; do not update tags or forms for the conflicted word.
 
 ### Umlaut Handling
 - Store and display proper Unicode (ae->ä, oe->ö, ue->ü, ss->ß where appropriate)
@@ -175,8 +188,8 @@ QUIZ_TEMPERATURE = 0.3
 QUIZ_TYPE_WEIGHTS = {
     "translate": 1.0,
     "verb_forms": 0.9,
-    "partizip": 0.8,
     "multiple_choice": 0.6,
+    "adjective_example": 0.6,
     "article": 0.5,
     "plural": 0.5,
 }
@@ -186,8 +199,8 @@ QUIZ_TYPE_WEIGHTS = {
 1. **translate** -- bot shows translation, user types the German word (all POS). For nouns, user must include article.
 2. **multiple_choice** -- bot shows German word + buttons with translation options; wrong options from same POS, fallback to all vocabulary. Buttons in Telegram.
 3. **article** -- nouns only: bot shows noun without article, user picks der/die/das buttons.
-4. **partizip** -- verbs with `partizip_ii`: bot shows translation, user types the full stored Partizip II (e.g. "hat gemacht").
-5. **verb_forms** -- irregular verbs only: bot shows infinitive + which form to type (e.g. "du"), user types the form. Form is randomly picked from stored irregular_forms JSON.
+4. **verb_forms** -- all verbs can use this type. Regular forms are generated for questions (Partizip II uses `hat` by default; present forms include `ich`, `du`, `er`, `wir`, `ihr`, `sie`). Stored forms in `irregular_forms` override generated forms. The focused `/verbs` mode also uses `verb_forms`, but first shows cards with generated regular forms plus stored irregular forms; at least half of its questions use stored irregular forms when enough are available.
+5. **adjective_example** -- adjectives only: bot generates a short phrase with a blank (for example `ein ___ Mann`) and asks for the inflected adjective form. This is a required `/learn` step for adjectives and an optional `/quiz` type after graduation.
 6. **plural** -- nouns with a non-empty plural only: bot shows article + singular ("die Katze"), user types the plural form ("Katzen"). Typed input with umlaut tolerance.
 
 ### Multiple Choice Option Filling
@@ -257,11 +270,11 @@ Full SM-2 implementation:
 - Words with earliest due date are prioritized for quiz selection
 
 ### Schema: Verb Forms as JSON
-Replace `ich_form`, `du_form`, `er_form` columns with:
+All non-standard verb formation is stored in one JSON column:
 ```sql
-irregular_forms TEXT  -- JSON: {"ich": "fahre", "du": "faehrst", "er": "faehrt"}
+irregular_forms TEXT  -- JSON: {"partizip_ii": "ist gefahren", "preteritum": "fuhr", "preteritum_du": "fuhrst", "du": "fährst"}
 ```
-Input format unchanged; positions parsed as ich, du, er by default. JSON storage is extensible for future forms.
+The legacy `partizip_ii` column is migrated into `irregular_forms["partizip_ii"]` and dropped. New regular verbs do not need Partizip II in storage because the bot generates regular Partizip II and present forms for questions. Generated Partizip II defaults to `hat ...`; store `p=ist ...` or any other exception explicitly. If a verb has any non-standard form, store it in `irregular_forms`; stored forms override generated forms. Use generic `pr=` for simple Präteritum, or person-specific `pr_du=`, `pr_er=`, etc. when the user wants those forms drilled separately.
 
 ### "Learned" Definition (for stats only)
 A word is considered **learned** when it graduates from `/learn` into the normal `/quiz` pool.
@@ -281,8 +294,10 @@ demotes the word back into `/learn` and it is not counted as currently learned u
 | `/tags` | List all existing tags |
 | `/delete <word>` | Delete a word card by its German text (umlaut-aware). Confirms via `/delete_confirm` if multiple matches. |
 | `/quiz [N] [tag]` | Start a quiz: `N` questions (default 7, capped at QUIZ_MAX_SIZE=50), optional tag filter. Args order-independent. If due words < N, the session cycles through them with new quiz types. **Excludes words still in the `/learn` pool.** |
-| `/learn [N] [tag]` | Massed-drill flow for new (or Blackout-flagged) words. Per word: show card → MC → typed → (article + plural for nouns / Partizip II + two verb forms for verbs where applicable). Correct answers advance silently; wrong answers are folded into the next prompt in the same edited bot message. A fresh step message is started every 5 steps so Telegram messages do not become too tall. Wrong steps get up to two retries in the same session, without showing the card again; a word graduates only when all required steps pass. Blackout words are tried before new words but use at most 50% of a normal `/learn` session. Graduation seeds word-level SM-2 with synthetic Good ratings and records learn history per applicable quiz type. Capped at `LEARN_MAX_SIZE=10`. |
+| `/verbs [N] [tag]` | Focused verb-form revision for due learned verbs. It shows cards first with generated regular forms and stored irregular forms, then asks typed form questions. If enough stored irregular forms exist, at least half of the questions use them. Uses the same rating buttons and SM-2 word-level scheduling as `/quiz`. |
+| `/learn [N] [tag]` | Massed-drill flow for new (or Blackout-flagged) words. Per word: show card → MC → typed → extras. Nouns add article + plural when available; adjectives add one generated form-in-context step; verbs add generated Partizip II + one present form, plus stored irregular forms where applicable. Each step gets a fresh Telegram message; old inline buttons are removed. After an answer, the next step message includes the previous word's full card, with stored verb forms rendered as a table-like block when needed. Wrong steps get up to two retries in the same session, without showing the card again; a word graduates only when all required steps pass. Blackout words are tried before new words but use at most 50% of a normal `/learn` session. Graduation seeds word-level SM-2 with synthetic Good ratings and records learn history per applicable quiz type. Capped at `LEARN_MAX_SIZE=10`. |
 | `/stats` | Show short text stats (today/week) and send an activity chart image |
+| `/today` | Show words learned today (`quiz_history.source='learn'`) and repeated today (`source='quiz'`) as a compact text list that can be pasted into an AI chat for extra practice |
 | `/health` | Owner-only bot health snapshot: limits, queue counts, DB size, log warnings/errors, and last activity |
 | `/remindme HH:MM [tz]` | Add a daily quiz reminder. Default timezone is `Europe/Berlin`. Multiple reminders per user supported. |
 | `/reminders` | List user's reminders with each one's source time and Berlin/Moscow equivalents. |
@@ -330,7 +345,7 @@ Configured in `bot/config.py` and enforced before writes where applicable:
 | `MAX_WORDS_PER_USER` | 5000 | `/add` batch is rejected before saving if it would exceed the cap |
 | `MAX_ADD_BATCH_SIZE` | 50 lines | Oversized `/add` message is rejected before parsing/saving |
 | `MAX_ADD_MESSAGE_CHARS` | 8000 | Oversized `/add` text is rejected |
-| `MAX_GERMAN_LENGTH` | 120 chars | German fields, plurals, Partizip II, and forms are rejected if too long |
+| `MAX_GERMAN_LENGTH` | 120 chars | German fields, plurals, and stored forms are rejected if too long |
 | `MAX_TRANSLATION_LENGTH` | 120 chars | Long translations are rejected |
 | `MAX_TAGS_PER_WORD` | 5 | Adding/merging a tag is rejected if the word would exceed this |
 | `MAX_TAGS_PER_USER` | 100 | New tag creation is rejected when the user already has 100 tags |
@@ -353,12 +368,11 @@ has a small byte limit and long user text can break inline buttons.
 CREATE TABLE words (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
-    part_of_speech TEXT NOT NULL,  -- 'n', 'v', 'adj', 'adv', 'prep'
+    part_of_speech TEXT NOT NULL,  -- 'n', 'v', 'adj', 'adv', 'prep', 'phrase'
     german TEXT NOT NULL,
     article TEXT,                   -- der/die/das (nouns only)
     plural TEXT,                    -- nouns only
-    partizip_ii TEXT,               -- verbs only
-    irregular_forms TEXT,            -- JSON: {"ich": "fahre", "du": "fährst", "er": "fährt"}
+    irregular_forms TEXT,            -- JSON: {"partizip_ii": "ist gefahren", "preteritum": "fuhr", "preteritum_du": "fuhrst", "du": "fährst"}
     translation TEXT NOT NULL,
     tags TEXT DEFAULT '',           -- comma-separated, e.g. 'animals,A1'
     added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -433,7 +447,7 @@ CREATE TABLE user_settings (
 - Daily firing handled by python-telegram-bot's `JobQueue` (requires `[job-queue]` extra → APScheduler)
 - Each job is named `reminder_{id}` so it can be individually cancelled
 - On every bot startup, `load_all_reminders` repopulates the JobQueue from the DB (jobs are in-memory only)
-- Reminder messages include a short practice prompt plus the learning overview (ready to review, waiting to learn, in rotation) when the DB connection is available, and show reply keyboard buttons for `/add`, `/quiz`, and `/learn`. Send failures (e.g., user blocked the bot) are caught and logged; the DB row is preserved so reminders resume if the user unblocks.
+- Reminder messages include a short practice prompt plus the learning overview (ready to review, waiting to learn, in rotation) when the DB connection is available, and show reply keyboard buttons for `/add`, `/quiz`, `/verbs`, and `/learn`. Send failures (e.g., user blocked the bot) are caught and logged; the DB row is preserved so reminders resume if the user unblocks.
 - `/reminders` displays both Berlin and Moscow times for each entry, regardless of source TZ; uses today's date as DST reference
 
 ## Owner Contact
@@ -505,6 +519,7 @@ docker compose --profile monitoring up -d --build metrics-exporter prometheus gr
 - [x] Preview-and-confirm flow for `/add` (`ADD_CONFIRM` state, `/confirm`)
 - [x] Tag merging on duplicate-word add
 - [x] Preposition POS (`prep`)
+- [x] Phrase/collocation POS (`phrase`, short input marker `phr`)
 - [x] Configurable quiz size (`/quiz [N] [tag]`) with cycling for small vocabularies
 - [x] Daily reminders with multi-timezone support (`/remindme`, `/reminders`, `/remindoff`)
 - [x] Learning flow (`/learn`): massed drill for brand-new and Blackout-flagged words; graduates into `/quiz` via synthetic Good rating; post-`/add` "Start learning" button; `last_quality` column on `sm2_state`

@@ -17,7 +17,6 @@ CREATE TABLE IF NOT EXISTS words (
     german TEXT NOT NULL,
     article TEXT,
     plural TEXT,
-    partizip_ii TEXT,
     irregular_forms TEXT,
     translation TEXT NOT NULL,
     tags TEXT DEFAULT '',
@@ -76,14 +75,14 @@ CREATE TABLE IF NOT EXISTS user_settings (
 );
 """
 
-VALID_PARTS_OF_SPEECH = {"n", "v", "adj", "adv", "prep"}
+VALID_PARTS_OF_SPEECH = {"n", "v", "adj", "adv", "prep", "phrase"}
 VALID_QUIZ_TYPES = {
     "translate",
     "multiple_choice",
     "article",
     "verb_forms",
     "plural",
-    "partizip",
+    "adjective_example",
 }
 WORD_REVIEW_STATE = "word"
 VALID_SM2_TYPES = VALID_QUIZ_TYPES | {WORD_REVIEW_STATE}
@@ -93,40 +92,35 @@ VALID_SM2_TYPES = VALID_QUIZ_TYPES | {WORD_REVIEW_STATE}
 # have a plural form) are added in get_quiz_types_for_word.
 APPLICABLE_QUIZ_TYPES: dict[str, list[str]] = {
     "n": ["translate", "multiple_choice", "article"],
-    "v": ["translate", "multiple_choice"],  # regular verbs
-    "adj": ["translate", "multiple_choice"],
+    "v": ["translate", "multiple_choice", "verb_forms"],
+    "adj": ["translate", "multiple_choice", "adjective_example"],
     "adv": ["translate", "multiple_choice"],
     "prep": ["translate", "multiple_choice"],
+    "phrase": ["translate", "multiple_choice"],
 }
 
-# Irregular verbs (those with ich/du/er forms) also get "verb_forms"
+# Verbs with stored non-standard forms also get "verb_forms"
 VERB_FORMS_QUIZ = "verb_forms"
 PLURAL_QUIZ = "plural"
-PARTIZIP_QUIZ = "partizip"
 
 
 def get_quiz_types_for_word(word: dict) -> list[str]:
     """Return the list of applicable quiz types for a given word."""
     pos = word["part_of_speech"]
     types = list(APPLICABLE_QUIZ_TYPES.get(pos, ["translate", "multiple_choice"]))
-    if pos == "v":
-        partizip = word.get("partizip_ii")
-        if partizip and partizip.strip():
-            types.append(PARTIZIP_QUIZ)
-        forms = parse_irregular_forms(word.get("irregular_forms"))
-        if forms:
-            types.append(VERB_FORMS_QUIZ)
-    elif pos == "n":
+    if pos == "n":
         plural = word.get("plural")
         if plural and plural.strip():
             types.append(PLURAL_QUIZ)
     return types
 
 
-def parse_irregular_forms(raw: str | None) -> dict | None:
+def parse_irregular_forms(raw: str | dict | None) -> dict | None:
     """Parse irregular_forms JSON string from DB into a dict."""
     if not raw:
         return None
+    if isinstance(raw, dict):
+        return raw
     try:
         forms = json.loads(raw)
         if isinstance(forms, dict):
@@ -204,6 +198,7 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
     inspect PRAGMA table_info first."""
     cursor = await conn.execute("PRAGMA table_info(sm2_state)")
     cols = {row[1] for row in await cursor.fetchall()}
+    await cursor.close()
     if "last_quality" not in cols:
         await conn.execute("ALTER TABLE sm2_state ADD COLUMN last_quality INTEGER")
         logger.info(
@@ -212,6 +207,7 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         )
     cursor = await conn.execute("PRAGMA table_info(quiz_history)")
     history_cols = {row[1] for row in await cursor.fetchall()}
+    await cursor.close()
     if "source" not in history_cols:
         await conn.execute(
             "ALTER TABLE quiz_history ADD COLUMN source TEXT NOT NULL DEFAULT 'quiz'"
@@ -231,7 +227,39 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
             "Migration: added quiz_history.source column",
             extra={"user_id": "system"},
         )
+    await _migrate_partizip_into_irregular_forms(conn)
     await _migrate_word_level_sm2(conn)
+
+
+async def _migrate_partizip_into_irregular_forms(conn: aiosqlite.Connection) -> None:
+    cursor = await conn.execute("PRAGMA table_info(words)")
+    word_cols = {row[1] for row in await cursor.fetchall()}
+    await cursor.close()
+    if "partizip_ii" not in word_cols:
+        return
+
+    cursor = await conn.execute(
+        """SELECT id, irregular_forms, partizip_ii
+           FROM words
+           WHERE part_of_speech = 'v'
+             AND partizip_ii IS NOT NULL
+             AND TRIM(partizip_ii) != ''"""
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
+    for row in rows:
+        forms = parse_irregular_forms(row["irregular_forms"]) or {}
+        forms.setdefault("partizip_ii", row["partizip_ii"])
+        await conn.execute(
+            "UPDATE words SET irregular_forms = ? WHERE id = ?",
+            (json.dumps(forms, ensure_ascii=False), row["id"]),
+        )
+
+    await conn.execute("ALTER TABLE words DROP COLUMN partizip_ii")
+    logger.info(
+        "Migration: moved words.partizip_ii into irregular_forms and dropped column",
+        extra={"user_id": "system"},
+    )
 
 
 async def _migrate_word_level_sm2(conn: aiosqlite.Connection) -> None:
@@ -293,19 +321,24 @@ async def add_word(
         raise ValueError("translation cannot be empty")
 
     normalized_tags = _normalize_tags(tags)
+    if partizip_ii and partizip_ii.strip():
+        irregular_forms = dict(irregular_forms or {})
+        irregular_forms.setdefault("partizip_ii", partizip_ii.strip())
+    forms_json = (
+        json.dumps(irregular_forms, ensure_ascii=False) if irregular_forms is not None else None
+    )
     cursor = await conn.execute(
         """INSERT INTO words
            (user_id, part_of_speech, german, article, plural,
-            partizip_ii, irregular_forms, translation, tags)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            irregular_forms, translation, tags)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             user_id,
             part_of_speech,
             german.strip(),
             article,
             plural,
-            partizip_ii,
-            json.dumps(irregular_forms) if irregular_forms is not None else None,
+            forms_json,
             translation.strip(),
             normalized_tags,
         ),
@@ -479,6 +512,51 @@ async def update_word_tags(
     log_user_action(logger, user_id, f"Updated tags on word id={word_id}: '{new_tags}'")
 
 
+async def update_word_irregular_forms(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    word_id: int,
+    irregular_forms: dict | None,
+) -> None:
+    forms_json = (
+        json.dumps(irregular_forms, ensure_ascii=False) if irregular_forms is not None else None
+    )
+    await conn.execute(
+        "UPDATE words SET irregular_forms = ? WHERE id = ? AND user_id = ?",
+        (forms_json, word_id, user_id),
+    )
+    await conn.commit()
+    log_user_action(logger, user_id, f"Updated irregular forms on word id={word_id}")
+
+
+def merge_irregular_forms(
+    existing_raw: str | None,
+    new_forms: dict | None,
+) -> tuple[dict | None, bool, dict[str, tuple[str, str]]]:
+    """Merge new verb forms without overwriting existing conflicting values.
+
+    Returns (merged_forms, changed, conflicts). Conflicts map form key to
+    (existing_value, new_value). If conflicts are present, the caller should
+    ignore the whole word update.
+    """
+    existing = parse_irregular_forms(existing_raw) or {}
+    incoming = {key: value for key, value in (new_forms or {}).items() if value}
+    if not incoming:
+        return (existing or None), False, {}
+
+    merged = dict(existing)
+    conflicts: dict[str, tuple[str, str]] = {}
+    changed = False
+    for key, value in incoming.items():
+        if key in merged:
+            if str(merged[key]).strip() != str(value).strip():
+                conflicts[key] = (str(merged[key]), str(value))
+            continue
+        merged[key] = value
+        changed = True
+    return (merged or None), changed, conflicts
+
+
 def merge_tag(existing_tags: str, new_tag: str) -> tuple[str, bool]:
     """Add `new_tag` to the comma-separated `existing_tags`, dedup.
 
@@ -634,6 +712,7 @@ async def get_due_words(
     limit: int = 7,
     tag: str | None = None,
     now: datetime | None = None,
+    part_of_speech: str | None = None,
 ) -> list[dict]:
     """Get words due for review. Returns words with earliest due next_review first.
 
@@ -643,9 +722,12 @@ async def get_due_words(
     if now is None:
         now = datetime.now()
     now_str = now.isoformat()
+    if part_of_speech is not None and part_of_speech not in VALID_PARTS_OF_SPEECH:
+        raise ValueError(f"Invalid part_of_speech: {part_of_speech!r}")
 
     # Note: f-strings here only interpolate the module-level _NOT_LEARNING_CLAUSE
     # constant, never user input. The S608 lint is a false positive on this shape.
+    pos_clause = " AND w.part_of_speech = ?" if part_of_speech else ""
     if tag:
         escaped_tag = _escape_like(tag)
         query = f"""
@@ -657,12 +739,18 @@ async def get_due_words(
                  AND (s.next_review IS NULL OR s.next_review <= ?)
             WHERE w.user_id = ?
               AND (',' || w.tags || ',') LIKE ? ESCAPE '\\'
+              {pos_clause}
               AND {_NOT_LEARNING_CLAUSE}
             ORDER BY earliest_review ASC
             LIMIT ?
         """  # noqa: S608
+        params = [WORD_REVIEW_STATE, now_str, user_id, f"%,{escaped_tag},%"]
+        if part_of_speech:
+            params.append(part_of_speech)
+        params.append(limit)
         cursor = await conn.execute(
-            query, (WORD_REVIEW_STATE, now_str, user_id, f"%,{escaped_tag},%", limit)
+            query,
+            params,
         )
     else:
         query = f"""
@@ -673,11 +761,16 @@ async def get_due_words(
                  AND s.quiz_type = ?
                  AND (s.next_review IS NULL OR s.next_review <= ?)
             WHERE w.user_id = ?
+              {pos_clause}
               AND {_NOT_LEARNING_CLAUSE}
             ORDER BY earliest_review ASC
             LIMIT ?
         """  # noqa: S608
-        cursor = await conn.execute(query, (WORD_REVIEW_STATE, now_str, user_id, limit))
+        params = [WORD_REVIEW_STATE, now_str, user_id]
+        if part_of_speech:
+            params.append(part_of_speech)
+        params.append(limit)
+        cursor = await conn.execute(query, params)
 
     rows = await cursor.fetchall()
     return [dict(row) for row in rows]
@@ -910,6 +1003,47 @@ async def get_stats(conn: aiosqlite.Connection, user_id: int, since: datetime) -
         "words_added": words_added,
         "words_learned": words_learned,
     }
+
+
+async def get_words_practiced_between(
+    conn: aiosqlite.Connection,
+    user_id: int,
+    start: datetime,
+    end: datetime,
+    source: str,
+    limit: int = 40,
+) -> list[dict]:
+    """Return unique word cards practiced in a time window for one history source.
+
+    ``source='learn'`` means words graduated from /learn. ``source='quiz'`` means
+    words revised in /quiz or /verbs. Dates must be timezone-aware and are
+    converted to UTC because SQLite timestamps are stored in UTC.
+    """
+    if source not in {"learn", "quiz"}:
+        raise ValueError(f"Invalid quiz history source: {source!r}")
+    if start.tzinfo is None or end.tzinfo is None:
+        raise ValueError("start and end must be timezone-aware")
+
+    start_utc = start.astimezone(timezone.utc).replace(tzinfo=None)
+    end_utc = end.astimezone(timezone.utc).replace(tzinfo=None)
+    start_str = start_utc.strftime("%Y-%m-%d %H:%M:%S")
+    end_str = end_utc.strftime("%Y-%m-%d %H:%M:%S")
+
+    cursor = await conn.execute(
+        """SELECT w.*, MAX(h.answered_at) AS practiced_at
+           FROM quiz_history h
+           JOIN words w ON w.id = h.word_id AND w.user_id = h.user_id
+           WHERE h.user_id = ?
+             AND h.source = ?
+             AND h.answered_at >= ?
+             AND h.answered_at < ?
+           GROUP BY w.id
+           ORDER BY practiced_at DESC
+           LIMIT ?""",
+        (user_id, source, start_str, end_str, limit),
+    )
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
 
 
 # --- Reminders ---

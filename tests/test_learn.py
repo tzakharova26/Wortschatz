@@ -1,4 +1,5 @@
 import json
+import random
 from datetime import datetime
 
 from bot.database import (
@@ -9,11 +10,10 @@ from bot.database import (
     upsert_sm2_state,
 )
 from bot.learn import (
+    ADJECTIVE_EXAMPLE,
     ARTICLE,
-    LEARN_VERB_FORMS_COUNT,
     MAX_STEP_ATTEMPTS,
     MC,
-    PARTIZIP,
     PLURAL,
     SHOW,
     TYPED,
@@ -36,7 +36,6 @@ def _word(
     translation: str = "fast",
     article: str | None = None,
     plural: str | None = None,
-    partizip_ii: str | None = None,
     irregular_forms: str | None = None,
     tags: str = "",
 ) -> dict:
@@ -47,7 +46,6 @@ def _word(
         "german": german,
         "article": article,
         "plural": plural,
-        "partizip_ii": partizip_ii,
         "irregular_forms": irregular_forms,
         "translation": translation,
         "tags": tags,
@@ -146,12 +144,13 @@ class TestNeedsLearningWords:
 
 
 class TestBuildSession:
-    def test_adjective_three_steps(self):
+    def test_adjective_includes_example_form_step(self):
         words = [_word(1, pos="adj")]
         s = build_session(USER_ID, words, words)
         types = [step.step_type for step in s.steps]
-        assert types == [SHOW, MC, TYPED]
-        assert s.required_per_word[1] == {SHOW, MC, TYPED}
+        assert types == [SHOW, MC, TYPED, ADJECTIVE_EXAMPLE]
+        assert s.required_per_word[1] == {SHOW, MC, TYPED, ADJECTIVE_EXAMPLE}
+        assert "___" in s.steps[-1].prompt
 
     def test_noun_includes_article_and_plural_steps(self):
         words = [
@@ -180,33 +179,47 @@ class TestBuildSession:
         assert types == [SHOW, MC, TYPED, ARTICLE]
 
     def test_irregular_verb_two_form_steps(self):
-        forms = json.dumps({"ich": "fahre", "du": "fährst", "er": "fährt"})
+        forms = json.dumps(
+            {
+                "partizip_ii": "ist gefahren",
+                "preteritum": "fuhr",
+                "ich": "fahre",
+                "du": "fährst",
+                "er": "fährt",
+            }
+        )
         words = [
             _word(
                 1,
                 pos="v",
                 german="fahren",
-                partizip_ii="ist gefahren",
                 irregular_forms=forms,
                 translation="to drive",
             )
         ]
         s = build_session(USER_ID, words, words)
-        assert PARTIZIP in [step.step_type for step in s.steps]
-        partizip_step = next(step for step in s.steps if step.step_type == PARTIZIP)
-        assert partizip_step.correct_answer == "ist gefahren"
         verb_steps = [step for step in s.steps if step.step_type == VERB_FORM]
-        assert len(verb_steps) == LEARN_VERB_FORMS_COUNT
+        assert len(verb_steps) == 5
         # Each verb_form step has a distinct key recorded as required
         keys = {f"{VERB_FORM}:{step.verb_form_key}" for step in verb_steps}
+        assert keys == {
+            f"{VERB_FORM}:partizip_ii",
+            f"{VERB_FORM}:preteritum",
+            f"{VERB_FORM}:ich",
+            f"{VERB_FORM}:du",
+            f"{VERB_FORM}:er",
+        }
         assert keys.issubset(s.required_per_word[1])
 
-    def test_regular_verb_has_partizip_step(self):
-        words = [_word(1, pos="v", german="machen", partizip_ii="hat gemacht", translation="to do")]
+    def test_regular_verb_has_partizip_and_one_present_form_step(self):
+        random.seed(1)
+        words = [_word(1, pos="v", german="machen", translation="to do")]
         s = build_session(USER_ID, words, words)
-        types = [step.step_type for step in s.steps]
-        assert types == [SHOW, MC, TYPED, PARTIZIP]
-        assert s.steps[-1].correct_answer == "hat gemacht"
+        verb_steps = [step for step in s.steps if step.step_type == VERB_FORM]
+        assert len(verb_steps) == 2
+        assert verb_steps[0].verb_form_key == "partizip_ii"
+        assert verb_steps[0].correct_answer == "hat gemacht"
+        assert verb_steps[1].verb_form_key in {"ich", "du", "er", "wir", "ihr", "sie"}
 
     def test_multi_word_steps_interleaved(self):
         """With ≥2 words, no two consecutive steps should be from the same word."""
@@ -216,16 +229,16 @@ class TestBuildSession:
             _word(3, pos="adj", german="müde", translation="tired"),
         ]
         session = build_session(USER_ID, words, words)
-        # Each adj contributes 3 steps × 3 words = 9 total
-        assert len(session.steps) == 9
+        # Each adj contributes 4 steps × 3 words = 12 total
+        assert len(session.steps) == 12
         # No same word twice in a row
         ids = [step.word["id"] for step in session.steps]
         for prev, curr in zip(ids, ids[1:], strict=False):
             assert prev != curr, f"consecutive steps on same word: {ids}"
-        # Per-word pedagogical order preserved (SHOW → MC → TYPED for each word)
+        # Per-word pedagogical order preserved (SHOW → MC → TYPED → ADJECTIVE_EXAMPLE)
         for word_id in (1, 2, 3):
             order = [step.step_type for step in session.steps if step.word["id"] == word_id]
-            assert order == [SHOW, MC, TYPED]
+            assert order == [SHOW, MC, TYPED, ADJECTIVE_EXAMPLE]
 
 
 # --- Step recording, retry queue, graduation ---
@@ -460,6 +473,27 @@ class TestApplyGraduations:
         word = _word(1, pos="adj", german="schnell", translation="fast", tags="A1,speed")
         prompt = _show_prompt(word)
         assert "A1,speed" in prompt
+
+    def test_show_prompt_formats_verb_forms_as_table(self):
+        from bot.learn import _show_prompt
+
+        word = _word(
+            1,
+            pos="v",
+            german="sein",
+            translation="to be",
+            irregular_forms=json.dumps(
+                {
+                    "partizip_ii": "ist gewesen",
+                    "preteritum_ich": "war",
+                    "preteritum_du": "warst",
+                }
+            ),
+        )
+        prompt = _show_prompt(word)
+        assert "<pre>" in prompt
+        assert "Partizip II" in prompt
+        assert "Präteritum du" in prompt
 
 
 # --- format_summary ---

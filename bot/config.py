@@ -49,7 +49,7 @@ def get_owner_user_id() -> int | None:
 LEARN_START_MESSAGE = (
     "Learning {n} word(s). Each word steps through:\n"
     "  1. See the card  2. Multiple choice  3. Type it\n"
-    "  + article and plural (nouns) or Partizip II and verb forms (verbs)\n\n"
+    "  + article/plural (nouns), adjective context, or verb forms\n\n"
     "Wrong steps get up to two retries. A word graduates only after every "
     "step is correct — graduated words become eligible for /quiz."
 )
@@ -57,8 +57,8 @@ LEARN_START_MESSAGE = (
 QUIZ_TYPE_WEIGHTS: dict[str, float] = {
     "translate": 1.0,
     "verb_forms": 0.9,
-    "partizip": 0.8,
     "multiple_choice": 0.6,
+    "adjective_example": 0.6,
     "article": 0.5,
     "plural": 0.5,
 }

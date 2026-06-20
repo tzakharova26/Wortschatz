@@ -18,12 +18,26 @@ class TestParseWordLine:
         assert err is None
         assert word["translation"] == "the dog"
 
+    def test_noun_without_plural_marker(self):
+        word, err = _parse_word_line("n das Geld - money")
+        assert err is None
+        assert word["part_of_speech"] == "n"
+        assert word["article"] == "das"
+        assert word["german"] == "Geld"
+        assert word["plural"] is None
+        assert word["translation"] == "money"
+
+    def test_noun_pipe_without_plural_marker(self):
+        word, err = _parse_word_line("n | die | Bildung | — | education")
+        assert err is None
+        assert word["plural"] is None
+        assert word["translation"] == "education"
+
     def test_regular_verb(self):
-        word, err = _parse_word_line("v machen hat gemacht to do")
+        word, err = _parse_word_line("v machen to do")
         assert err is None
         assert word["part_of_speech"] == "v"
         assert word["german"] == "machen"
-        assert word["partizip_ii"] == "hat gemacht"
         assert word["translation"] == "to do"
         assert word["irregular_forms"] is None
 
@@ -33,18 +47,21 @@ class TestParseWordLine:
         assert err is None
         assert word["part_of_speech"] == "v"
         assert word["german"] == "fahren"
-        assert word["partizip_ii"] == "ist gefahren"
-        assert word["irregular_forms"] == {"ich": "fahre", "du": "faehrst", "er": "faehrt"}
+        assert word["irregular_forms"] == {
+            "partizip_ii": "ist gefahren",
+            "ich": "fahre",
+            "du": "faehrst",
+            "er": "faehrt",
+        }
         assert word["translation"] == "to drive"
 
     def test_irregular_verb_preserves_unicode_umlauts(self):
         word, err = _parse_word_line("vi fahren ist gefahren fahre fährst fährt to drive")
         assert err is None
-        assert word["irregular_forms"] == {"ich": "fahre", "du": "fährst", "er": "fährt"}
+        assert word["irregular_forms"]["du"] == "fährst"
 
     def test_regular_verb_with_long_translation_not_misparsed(self):
-        """Regression: 'v gehen ist gegangen to walk on foot' must be regular."""
-        word, err = _parse_word_line("v gehen ist gegangen to walk on foot")
+        word, err = _parse_word_line("v gehen to walk on foot")
         assert err is None
         assert word["irregular_forms"] is None
         assert word["translation"] == "to walk on foot"
@@ -52,8 +69,12 @@ class TestParseWordLine:
     def test_irregular_verb_single_partizip(self):
         word, err = _parse_word_line("vi sehen gesehen sehe siehst sieht to see")
         assert err is None
-        assert word["partizip_ii"] == "gesehen"
-        assert word["irregular_forms"] == {"ich": "sehe", "du": "siehst", "er": "sieht"}
+        assert word["irregular_forms"] == {
+            "partizip_ii": "gesehen",
+            "ich": "sehe",
+            "du": "siehst",
+            "er": "sieht",
+        }
         assert word["translation"] == "to see"
 
     def test_irregular_verb_multi_word_translation(self):
@@ -61,6 +82,7 @@ class TestParseWordLine:
         word, err = _parse_word_line("vi laufen ist gelaufen laufe laeufst laeuft to run very fast")
         assert err is None
         assert word["irregular_forms"] == {
+            "partizip_ii": "ist gelaufen",
             "ich": "laufe",
             "du": "laeufst",
             "er": "laeuft",
@@ -77,15 +99,30 @@ class TestParseWordLine:
         assert err is None
         assert word["part_of_speech"] == "v"
         assert word["german"] == "machen"
-        assert word["partizip_ii"] == "hat gemacht"
-        assert word["translation"] == "to do something"
+        assert word["translation"] == "hat gemacht to do something"
         assert word["irregular_forms"] is None
 
-    def test_regular_verb_pipe_single_partizip(self):
-        word, err = _parse_word_line("v | spielen | gespielt | to play")
+    def test_verb_pipe_with_short_irregular_forms(self):
+        word, err = _parse_word_line("v | bringen | p=hat gebracht | pr=brachte | to bring")
         assert err is None
-        assert word["partizip_ii"] == "gespielt"
-        assert word["translation"] == "to play"
+        assert word["irregular_forms"] == {
+            "partizip_ii": "hat gebracht",
+            "preteritum": "brachte",
+        }
+        assert word["translation"] == "to bring"
+
+    def test_verb_pipe_with_person_specific_preteritum(self):
+        word, err = _parse_word_line(
+            "v | sein | p=ist gewesen | pr_ich=war | pr-du=warst | pr_er=war | to be"
+        )
+        assert err is None
+        assert word["irregular_forms"] == {
+            "partizip_ii": "ist gewesen",
+            "preteritum_ich": "war",
+            "preteritum_du": "warst",
+            "preteritum_er": "war",
+        }
+        assert word["translation"] == "to be"
 
     def test_irregular_verb_pipe(self):
         word, err = _parse_word_line(
@@ -94,9 +131,9 @@ class TestParseWordLine:
         assert err is None
         assert word["part_of_speech"] == "v"
         assert word["german"] == "fahren"
-        assert word["partizip_ii"] == "ist gefahren"
         # Input preserved verbatim — no auto-conversion.
         assert word["irregular_forms"] == {
+            "partizip_ii": "ist gefahren",
             "ich": "fahre",
             "du": "faehrst",
             "er": "faehrt",
@@ -104,14 +141,14 @@ class TestParseWordLine:
         assert word["translation"] == "to drive a car"
 
     def test_regular_verb_pipe_too_few(self):
-        word, err = _parse_word_line("v | machen | hat gemacht")
+        word, err = _parse_word_line("v | machen")
         assert word is None
         assert err is not None and "v |" in err
 
     def test_irregular_verb_pipe_too_few(self):
         word, err = _parse_word_line("vi | fahren | ist gefahren | fahre | faehrst")
         assert word is None
-        assert err is not None and "vi |" in err
+        assert err is not None and "irregular forms" in err
 
     def test_adjective(self):
         word, err = _parse_word_line("adj schnell fast")
@@ -162,13 +199,13 @@ class TestParseWordLine:
 
     def test_verb_too_few_parts(self):
         word, err = _parse_word_line("v machen hat")
-        assert word is None
-        assert "v needs" in err
+        assert err is None
+        assert word["translation"] == "hat"
 
     def test_verb_ist_too_few(self):
-        word, err = _parse_word_line("v fahren ist gefahren")
+        word, err = _parse_word_line("v fahren")
         assert word is None
-        assert "needs more fields" in err
+        assert "Too few" in err
 
     def test_unknown_pos(self):
         word, err = _parse_word_line("xyz something translation")
@@ -207,26 +244,47 @@ class TestParseWordLine:
         assert word["plural"] == "Mädchen"
 
     def test_verb_partizip_with_umlaut_preserved(self):
-        word, err = _parse_word_line("v fahren gefahren to drive")
+        word, err = _parse_word_line("v | fahren | p=gefahren | to drive")
         assert err is None
-        assert word["partizip_ii"] == "gefahren"
+        assert word["irregular_forms"]["partizip_ii"] == "gefahren"
         # And the unicode variant on partizip
-        word2, err2 = _parse_word_line("v hören gehört to hear")
+        word2, err2 = _parse_word_line("v | hören | p=gehört | to hear")
         assert err2 is None
         assert word2["german"] == "hören"
-        assert word2["partizip_ii"] == "gehört"
+        assert word2["irregular_forms"]["partizip_ii"] == "gehört"
 
     def test_verb_single_partizip(self):
         """Verb with single-word partizip (no ist/hat prefix)."""
-        word, err = _parse_word_line("v spielen gespielt to play")
+        word, err = _parse_word_line("v | spielen | p=gespielt | to play")
         assert err is None
-        assert word["partizip_ii"] == "gespielt"
+        assert word["irregular_forms"]["partizip_ii"] == "gespielt"
         assert word["translation"] == "to play"
 
     def test_adj_multi_word_translation(self):
         word, err = _parse_word_line("adj gut very good")
         assert err is None
         assert word["translation"] == "very good"
+
+    def test_phrase_space_separated(self):
+        word, err = _parse_word_line("phrase morgens in the morning")
+        assert err is None
+        assert word["part_of_speech"] == "phrase"
+        assert word["german"] == "morgens"
+        assert word["translation"] == "in the morning"
+
+    def test_phrase_pipe_separated(self):
+        word, err = _parse_word_line("phrase | auf jeden Fall | in any case")
+        assert err is None
+        assert word["part_of_speech"] == "phrase"
+        assert word["german"] == "auf jeden Fall"
+        assert word["translation"] == "in any case"
+
+    def test_phrase_short_marker(self):
+        word, err = _parse_word_line("phr | sich Mühe geben | to make an effort")
+        assert err is None
+        assert word["part_of_speech"] == "phrase"
+        assert word["german"] == "sich Mühe geben"
+        assert word["translation"] == "to make an effort"
 
 
 class TestParseWordLineHtmlEscaping:

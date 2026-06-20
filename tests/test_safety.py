@@ -9,7 +9,6 @@ def test_rejects_long_german_field():
         "german": "x" * (MAX_GERMAN_LENGTH + 1),
         "translation": "fast",
         "plural": "",
-        "partizip_ii": "",
         "irregular_forms": None,
     }
 
@@ -22,7 +21,6 @@ def test_rejects_long_translation():
         "german": "schnell",
         "translation": "x" * (MAX_TRANSLATION_LENGTH + 1),
         "plural": "",
-        "partizip_ii": "",
         "irregular_forms": None,
     }
 

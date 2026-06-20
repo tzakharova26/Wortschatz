@@ -21,6 +21,7 @@ from bot.database import (
     get_words,
     get_words_by_pos,
     init_db,
+    merge_irregular_forms,
     merge_tag,
     parse_irregular_forms,
     update_word_tags,
@@ -95,10 +96,10 @@ class TestAddWord:
             irregular_forms={"ich": "fahre", "du": "f\u00e4hrst", "er": "f\u00e4hrt"},
         )
         word = await get_word_by_id(db, word_id, USER_ID)
-        assert word["partizip_ii"] == "ist gefahren"
         import json
 
         forms = json.loads(word["irregular_forms"])
+        assert forms["partizip_ii"] == "ist gefahren"
         assert forms["ich"] == "fahre"
 
     async def test_add_adjective(self, db):
@@ -263,33 +264,35 @@ class TestQuizTypesForWord:
         assert get_quiz_types_for_word(word) == ["translate", "multiple_choice", "article"]
 
     def test_regular_verb(self):
-        word = {"part_of_speech": "v", "irregular_forms": None, "partizip_ii": "hat gemacht"}
-        assert get_quiz_types_for_word(word) == ["translate", "multiple_choice", "partizip"]
+        word = {"part_of_speech": "v", "irregular_forms": None}
+        assert get_quiz_types_for_word(word) == ["translate", "multiple_choice", "verb_forms"]
 
     def test_irregular_verb(self):
         word = {
             "part_of_speech": "v",
-            "irregular_forms": '{"ich": "fahre"}',
-            "partizip_ii": "ist gefahren",
+            "irregular_forms": '{"partizip_ii": "ist gefahren", "ich": "fahre"}',
         }
         assert get_quiz_types_for_word(word) == [
             "translate",
             "multiple_choice",
-            "partizip",
             "verb_forms",
         ]
 
     def test_adjective(self):
         word = {"part_of_speech": "adj", "irregular_forms": None}
-        assert get_quiz_types_for_word(word) == ["translate", "multiple_choice"]
+        assert get_quiz_types_for_word(word) == [
+            "translate",
+            "multiple_choice",
+            "adjective_example",
+        ]
 
     def test_verb_with_empty_json_forms(self):
-        word = {"part_of_speech": "v", "irregular_forms": "{}", "partizip_ii": None}
-        assert get_quiz_types_for_word(word) == ["translate", "multiple_choice"]
+        word = {"part_of_speech": "v", "irregular_forms": "{}"}
+        assert get_quiz_types_for_word(word) == ["translate", "multiple_choice", "verb_forms"]
 
     def test_verb_with_invalid_json_forms(self):
-        word = {"part_of_speech": "v", "irregular_forms": "not json", "partizip_ii": None}
-        assert get_quiz_types_for_word(word) == ["translate", "multiple_choice"]
+        word = {"part_of_speech": "v", "irregular_forms": "not json"}
+        assert get_quiz_types_for_word(word) == ["translate", "multiple_choice", "verb_forms"]
 
 
 class TestSM2State:
@@ -735,6 +738,9 @@ class TestParseIrregularForms:
         forms = parse_irregular_forms('{"ich": "fahre", "du": "fährst"}')
         assert forms == {"ich": "fahre", "du": "fährst"}
 
+    def test_dict(self):
+        assert parse_irregular_forms({"ich": "fahre"}) == {"ich": "fahre"}
+
     def test_none(self):
         assert parse_irregular_forms(None) is None
 
@@ -752,6 +758,35 @@ class TestParseIrregularForms:
 
     def test_whitespace_only(self):
         assert parse_irregular_forms("   ") is None
+
+
+class TestMergeIrregularForms:
+    def test_adds_new_keys(self):
+        merged, changed, conflicts = merge_irregular_forms(
+            '{"preteritum": "rief"}',
+            {"preteritum_du": "riefst"},
+        )
+        assert merged == {"preteritum": "rief", "preteritum_du": "riefst"}
+        assert changed is True
+        assert conflicts == {}
+
+    def test_same_value_is_not_conflict(self):
+        merged, changed, conflicts = merge_irregular_forms(
+            '{"preteritum": "rief"}',
+            {"preteritum": "rief"},
+        )
+        assert merged == {"preteritum": "rief"}
+        assert changed is False
+        assert conflicts == {}
+
+    def test_conflict_reports_existing_and_new_value(self):
+        merged, changed, conflicts = merge_irregular_forms(
+            '{"preteritum": "rief"}',
+            {"preteritum": "rufte", "preteritum_du": "riefst"},
+        )
+        assert merged == {"preteritum": "rief", "preteritum_du": "riefst"}
+        assert changed is True
+        assert conflicts == {"preteritum": ("rief", "rufte")}
 
 
 class TestIrregularFormsRoundTrip:
@@ -805,6 +840,10 @@ class TestQuizTypesAdverb:
 
     def test_preposition(self):
         word = {"part_of_speech": "prep", "irregular_forms": None}
+        assert get_quiz_types_for_word(word) == ["translate", "multiple_choice"]
+
+    def test_phrase(self):
+        word = {"part_of_speech": "phrase", "irregular_forms": None}
         assert get_quiz_types_for_word(word) == ["translate", "multiple_choice"]
 
 

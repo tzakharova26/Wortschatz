@@ -26,8 +26,9 @@ from bot.handlers import (
 class TestConstants:
     def test_add_format_message_has_all_pos(self):
         assert "n article word plural translation" in ADD_FORMAT_MESSAGE
-        assert "v infinitive partizip_ii translation" in ADD_FORMAT_MESSAGE
-        assert "vi infinitive" in ADD_FORMAT_MESSAGE
+        assert "No plural" in ADD_FORMAT_MESSAGE
+        assert "v infinitive translation" in ADD_FORMAT_MESSAGE
+        assert "p=Partizip II" in ADD_FORMAT_MESSAGE
         assert "adj word translation" in ADD_FORMAT_MESSAGE
         assert "adv word translation" in ADD_FORMAT_MESSAGE
         # Preview now uses inline buttons (Confirm + Cancel) instead of /confirm and /cancel
@@ -41,7 +42,9 @@ class TestConstants:
             "/tags",
             "/delete",
             "/quiz",
+            "/verbs",
             "/stats",
+            "/today",
             "/health",
             "/help",
             "/contact",
@@ -98,6 +101,7 @@ class TestListCommand:
         text = upd.message.reply_text.call_args.args[0]
         assert "Katze" in text
         assert "(1 total)" in text
+        assert "[1]" not in text
 
     async def test_truncates_to_max(self, fake_update, fake_context, db):
         for i in range(LIST_MAX_WORDS + 5):

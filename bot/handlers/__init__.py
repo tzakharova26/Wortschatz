@@ -126,6 +126,7 @@ from .simple import (
     start_command,
     stats_command,
     tags_command,
+    today_command,
 )
 
 __all__ = [
@@ -192,6 +193,7 @@ __all__ = [
     "start_command",
     "stats_command",
     "tags_command",
+    "today_command",
     # /reminders
     "reminders_command",
     "remindme_command",

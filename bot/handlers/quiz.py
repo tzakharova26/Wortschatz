@@ -32,11 +32,14 @@ from bot.database import (
 from bot.i18n import quiz_start_message
 from bot.logging_config import get_logger, log_user_action, log_user_warning
 from bot.progress import format_quiz_intro
+from bot.questions import all_verb_forms, verb_form_label
 from bot.quiz import (
     apply_results,
     build_quiz_session,
+    build_verb_revision_session,
     check_answer,
     format_summary,
+    format_verb_revision_cards,
     german_with_article,
 )
 from bot.safety import LimitExceeded, ensure_db_size_allows_write
@@ -226,7 +229,7 @@ async def quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     # Collect all user words for multiple choice options
     all_user_words = []
-    for pos in ("n", "v", "adj", "adv", "prep"):
+    for pos in ("n", "v", "adj", "adv", "prep", "phrase"):
         all_user_words.extend(await get_words_by_pos(conn, user_id, pos))
 
     session = build_quiz_session(user_id, due_words, all_user_words, size=size, lang=lang)
@@ -254,6 +257,81 @@ async def quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return QUIZ_ANSWERING
 
 
+async def verbs_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    conn = _get_conn(context)
+    lang = await _get_lang(context, user_id)
+    _clear_quiz_state(context)
+
+    requested_size, tag = _parse_quiz_args(context.args or [])
+    if requested_size is not None and requested_size <= 0:
+        await update.message.reply_text(
+            "Размер тренировки должен быть положительным числом."
+            if lang == "ru"
+            else "Verb revision size must be a positive number."
+        )
+        return ConversationHandler.END
+
+    capped = False
+    if requested_size is not None and requested_size > QUIZ_MAX_SIZE:
+        requested_size = QUIZ_MAX_SIZE
+        capped = True
+    size = requested_size if requested_size is not None else QUIZ_SESSION_SIZE
+
+    log_user_action(logger, user_id, f"/verbs size={size} tag={_safe_log(tag) if tag else 'all'}")
+    try:
+        await ensure_db_size_allows_write(conn, user_id)
+    except LimitExceeded as e:
+        log_user_warning(logger, user_id, e.log_message)
+        await update.message.reply_text(e.user_message)
+        return ConversationHandler.END
+
+    pool_limit = min(QUIZ_MAX_SIZE, max(size * QUIZ_SELECTION_POOL_MULTIPLIER, size))
+    due_verbs = await get_due_words(conn, user_id, limit=pool_limit, tag=tag, part_of_speech="v")
+    if not due_verbs:
+        msg = (
+            "Сейчас нет глаголов, которые пора повторить."
+            if lang == "ru"
+            else "No verbs are due for revision right now."
+        )
+        if tag:
+            msg += f" (тег: #{tag})" if lang == "ru" else f" (tag: #{tag})"
+        await update.message.reply_text(msg)
+        return ConversationHandler.END
+
+    session = build_verb_revision_session(user_id, due_verbs, size=size, lang=lang)
+    context.user_data["quiz_session"] = session
+    context.user_data["quiz_all_words"] = due_verbs
+
+    irregular_count = 0
+    selected_words_by_id = {}
+    for question in session.questions:
+        selected_words_by_id[question.word["id"]] = question.word
+        stored = parse_irregular_forms(question.word.get("irregular_forms")) or {}
+        if question.verb_form_key and question.verb_form_key in stored:
+            irregular_count += 1
+    intro = (
+        f"Тренировка глаголов: {len(session.questions)} вопросов. "
+        f"Нестандартные формы: {irregular_count}."
+        if lang == "ru"
+        else f"Verb revision: {len(session.questions)} questions. "
+        f"Stored irregular forms: {irregular_count}."
+    )
+    if capped:
+        intro = (
+            f"(Ограничено до {QUIZ_MAX_SIZE} вопросов.)\n\n"
+            if lang == "ru"
+            else f"(Capped to {QUIZ_MAX_SIZE} questions.)\n\n"
+        ) + intro
+    await update.message.reply_text(
+        intro + "\n\n" + format_verb_revision_cards(list(selected_words_by_id.values()), lang),
+        parse_mode="HTML",
+    )
+    await update.message.reply_text(quiz_start_message(lang), parse_mode="HTML")
+    await _send_question(update.message, context)
+    return QUIZ_ANSWERING
+
+
 def _format_word_card(question, lang: str = "en") -> str:
     """Compact post-answer card with translation and relevant stored forms."""
     word = question.word
@@ -267,13 +345,17 @@ def _format_word_card(question, lang: str = "en") -> str:
             label = "мн. число" if lang == "ru" else "plural"
             lines.append(f"{label}: {html.escape(plural)}")
     elif word.get("part_of_speech") == "v":
-        partizip = word.get("partizip_ii")
-        if partizip and partizip.strip():
-            lines.append(f"Partizip II: {html.escape(partizip)}")
-        forms = parse_irregular_forms(word.get("irregular_forms"))
+        stored_forms = parse_irregular_forms(word.get("irregular_forms"))
+        forms = (
+            {key: value for key, (value, _irregular) in all_verb_forms(word, stored_forms).items()}
+            if question.quiz_type == "verb_forms"
+            else stored_forms
+        )
         if forms:
             forms_text = ", ".join(
-                f"{html.escape(k)}: {html.escape(v)}" for k, v in forms.items() if v
+                f"{html.escape(verb_form_label(k))}: {html.escape(v)}"
+                for k, v in forms.items()
+                if v
             )
             if forms_text:
                 label = "формы" if lang == "ru" else "forms"
@@ -282,16 +364,17 @@ def _format_word_card(question, lang: str = "en") -> str:
     if question.quiz_type == "verb_forms" and question.verb_form_key:
         label = "спрашивали" if lang == "ru" else "asked"
         lines.append(
-            f"{label}: {html.escape(question.verb_form_key)} → "
+            f"{label}: {html.escape(verb_form_label(question.verb_form_key))} → "
             f"{html.escape(question.correct_answer)}"
         )
-    elif question.quiz_type == "partizip":
-        label = "спрашивали" if lang == "ru" else "asked"
-        lines.append(f"{label}: Partizip II → {html.escape(question.correct_answer)}")
     elif question.quiz_type == "plural":
         label = "спрашивали" if lang == "ru" else "asked"
         plural_label = "мн. число" if lang == "ru" else "plural"
         lines.append(f"{label}: {plural_label} → {html.escape(question.correct_answer)}")
+    elif question.quiz_type == "adjective_example":
+        label = "спрашивали" if lang == "ru" else "asked"
+        form_label = "форма прилагательного" if lang == "ru" else "adjective form"
+        lines.append(f"{label}: {form_label} → {html.escape(question.correct_answer)}")
     return "\n".join(lines)
 
 
@@ -307,7 +390,7 @@ def _format_answer_response(question, correct: bool, lang: str = "en") -> str:
 
 
 async def quiz_text_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle typed answer (translate, verb_forms, plural)."""
+    """Handle typed answer (translate, verb_forms, plural, adjective example)."""
     session = context.user_data.get("quiz_session")
     if not session or session.is_finished:
         await update.message.reply_text(
@@ -509,7 +592,7 @@ async def quiz_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
 def get_quiz_conversation() -> ConversationHandler:
     return ConversationHandler(
-        entry_points=[CommandHandler("quiz", quiz_start)],
+        entry_points=[CommandHandler("quiz", quiz_start), CommandHandler("verbs", verbs_start)],
         states={
             QUIZ_ANSWERING: [
                 CallbackQueryHandler(quiz_button_answer, pattern=f"^({CB_MC}|{CB_ART})"),

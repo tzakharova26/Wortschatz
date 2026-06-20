@@ -43,7 +43,6 @@ from ._shared import (
 )
 
 logger = get_logger(__name__)
-LEARN_STEPS_PER_MESSAGE = 5
 
 
 def _clear_learn_state(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -106,14 +105,13 @@ async def _send_learn_step(reply_target, context: ContextTypes.DEFAULT_TYPE) -> 
     feedback = context.user_data.pop("learn_feedback", None)
     if feedback:
         text = feedback + "\n\n" + text
-    force_new_message = idx > 1 and (idx - 1) % LEARN_STEPS_PER_MESSAGE == 0
     await _edit_or_reply_session_message(
         context,
         "learn_message",
         reply_target,
         text,
         reply_markup=markup,
-        force_new=force_new_message,
+        force_new=True,
     )
 
 
@@ -181,7 +179,7 @@ async def _start_learn_session(
 
     conn = _get_conn(context)
     all_user_words: list[dict] = []
-    for pos in ("n", "v", "adj", "adv", "prep"):
+    for pos in ("n", "v", "adj", "adv", "prep", "phrase"):
         all_user_words.extend(await get_words_by_pos(conn, user_id, pos))
 
     lang = await _get_lang(context, user_id)
@@ -330,8 +328,7 @@ async def learn_button_answer(update: Update, context: ContextTypes.DEFAULT_TYPE
             user_answer = raw_answer
         correct = learn_core.check_answer(step, user_answer)
         session.record_step(correct=correct)
-        if not correct:
-            context.user_data["learn_feedback"] = _format_learn_feedback(step, session.lang)
+        context.user_data["learn_feedback"] = _format_learn_feedback(step, correct, session.lang)
     else:
         log_user_warning(logger, session.user_id, f"Unknown learn callback: {data!r}")
         return LEARN_ANSWERING
@@ -344,7 +341,7 @@ async def learn_button_answer(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def learn_text_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles TYPED, PARTIZIP, VERB_FORM, and PLURAL steps."""
+    """Handles TYPED, VERB_FORM, and PLURAL steps."""
     session: learn_core.LearnSession | None = context.user_data.get("learn_session")
     if not session or session.is_finished:
         lang = await _get_lang(context, update.effective_user.id)
@@ -358,23 +355,23 @@ async def learn_text_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     step = session.current_step
     if step.step_type not in (
         learn_core.TYPED,
-        learn_core.PARTIZIP,
         learn_core.VERB_FORM,
         learn_core.PLURAL,
+        learn_core.ADJECTIVE_EXAMPLE,
     ):
-        # User typed during a button-only step. Just nudge them.
+        # User typed during a button-only step. Resend the current prompt with
+        # buttons, because the original Telegram message may have scrolled away
+        # or lost its inline keyboard after an edit/restart.
         await update.message.reply_text(
-            "Пожалуйста, используй кнопки выше."
-            if session.lang == "ru"
-            else "Please use the buttons above."
+            "Пришлю кнопки еще раз." if session.lang == "ru" else "I’ll resend the buttons."
         )
+        await _send_learn_step(update.message, context)
         return LEARN_ANSWERING
 
     user_answer = update.message.text.strip()
     correct = learn_core.check_answer(step, user_answer)
     session.record_step(correct=correct)
-    if not correct:
-        context.user_data["learn_feedback"] = _format_learn_feedback(step, session.lang)
+    context.user_data["learn_feedback"] = _format_learn_feedback(step, correct, session.lang)
 
     if session.is_finished:
         return await _finish_learn(update.message, context)
@@ -383,11 +380,21 @@ async def learn_text_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return LEARN_ANSWERING
 
 
-def _format_learn_feedback(step, lang: str = "en") -> str:
+def _format_learn_feedback(step, correct: bool, lang: str = "en") -> str:
+    card_label = "Предыдущее слово" if lang == "ru" else "Previous word"
+    card = learn_core.format_word_card(step.word)
+    if correct:
+        return f"<b>{card_label}</b>\n{card}"
     safe_answer = html.escape(step.correct_answer or "")
     if lang == "ru":
-        return f"<b>Повторим это позже.</b>\nОтвет: <b>{safe_answer}</b>"
-    return f"<b>Try this one again later.</b>\nAnswer: <b>{safe_answer}</b>"
+        return (
+            f"<b>Повторим это позже.</b>\nОтвет: <b>{safe_answer}</b>\n\n"
+            f"<b>{card_label}</b>\n{card}"
+        )
+    return (
+        f"<b>Try this one again later.</b>\nAnswer: <b>{safe_answer}</b>\n\n"
+        f"<b>{card_label}</b>\n{card}"
+    )
 
 
 async def _finish_learn(reply_target, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -412,6 +419,9 @@ async def _finish_learn(reply_target, context: ContextTypes.DEFAULT_TYPE) -> int
         limit_message = None
 
     summary = learn_core.format_summary(session)
+    feedback = context.user_data.pop("learn_feedback", None)
+    if feedback:
+        summary = feedback + "\n\n" + summary
     if graduated == -1 and limit_message:
         summary += f"\n\n{html.escape(limit_message)}"
     elif graduated == -1:

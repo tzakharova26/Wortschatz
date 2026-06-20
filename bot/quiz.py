@@ -15,9 +15,12 @@ from bot.database import (
 from bot.i18n import normalize_language
 from bot.logging_config import get_logger, log_user_action, log_user_error, log_user_warning
 from bot.questions import (
+    adjective_example_question,
+    all_verb_forms,
     german_with_article,
     is_correct,
     multiple_choice_options,
+    verb_form_label,
 )
 from bot.sm2 import calculate_sm2, sm2_from_db
 
@@ -58,6 +61,7 @@ class QuizSession:
     # results aligned with questions: None for misspell (skipped), (quality, correct) otherwise
     results: list[tuple[int, bool] | None] = field(default_factory=list)
     lang: str = "en"
+    verb_revision: bool = False
 
     @property
     def is_finished(self) -> bool:
@@ -97,8 +101,11 @@ class QuizSession:
                 f"limit={self.max_questions}",
             )
             return
-        quiz_type = select_quiz_type(word)
-        question = generate_question(word, quiz_type, all_words, lang=self.lang)
+        if self.verb_revision:
+            question = generate_verb_revision_question(word, lang=self.lang)
+        else:
+            quiz_type = select_quiz_type(word)
+            question = generate_question(word, quiz_type, all_words, lang=self.lang)
         self.questions.append(question)
 
     @property
@@ -200,8 +207,8 @@ def generate_question(
         return _generate_article(word, lang)
     elif quiz_type == "verb_forms":
         return _generate_verb_forms(word, lang)
-    elif quiz_type == "partizip":
-        return _generate_partizip(word, lang)
+    elif quiz_type == "adjective_example":
+        return _generate_adjective_example(word, lang)
     elif quiz_type == "plural":
         return _generate_plural(word, lang)
     else:
@@ -299,14 +306,39 @@ def _generate_plural(word: dict, lang: str = "en") -> QuizQuestion:
     )
 
 
+def _generate_adjective_example(word: dict, lang: str = "en") -> QuizQuestion:
+    if word.get("part_of_speech") != "adj":
+        log_user_warning(
+            logger,
+            word.get("user_id", 0),
+            f"Adjective example quiz for non-adjective '{word['german']}', "
+            "falling back to translate",
+        )
+        return _generate_translate(word, lang)
+    phrase, correct = adjective_example_question(word["german"])
+    prompt = (
+        f"Вставь форму прилагательного '{word['german']}':\n{phrase}"
+        if normalize_language(lang) == "ru"
+        else f"Fill in the adjective form for '{word['german']}':\n{phrase}"
+    )
+    return QuizQuestion(
+        word=word,
+        quiz_type="adjective_example",
+        prompt=prompt,
+        options=None,
+        correct_answer=correct,
+    )
+
+
 def _generate_verb_forms(word: dict, lang: str = "en") -> QuizQuestion:
-    """Verb forms quiz: show infinitive, ask for a specific form."""
-    forms = parse_irregular_forms(word.get("irregular_forms"))
+    """Verb forms quiz: show infinitive, ask for one generated or stored form."""
+    forms_with_flags = all_verb_forms(word, parse_irregular_forms(word.get("irregular_forms")))
+    forms = {key: value for key, (value, _is_irregular) in forms_with_flags.items()}
     if not forms:
         log_user_warning(
             logger,
             word.get("user_id", 0),
-            f"Verb forms quiz for '{word['german']}' without irregular forms, "
+            f"Verb forms quiz for '{word['german']}' without generated/stored forms, "
             "falling back to translate",
         )
         return _generate_translate(word, lang)
@@ -321,10 +353,11 @@ def _generate_verb_forms(word: dict, lang: str = "en") -> QuizQuestion:
             "falling back to translate",
         )
         return _generate_translate(word, lang)
+    label = verb_form_label(form_key)
     prompt = (
-        f"Напиши форму '{form_key}' для '{word['german']}'"
+        f"Напиши форму '{label}' для '{word['german']}'"
         if normalize_language(lang) == "ru"
-        else f"What is the '{form_key}' form of '{word['german']}'?"
+        else f"What is the '{label}' form of '{word['german']}'?"
     )
 
     return QuizQuestion(
@@ -337,27 +370,25 @@ def _generate_verb_forms(word: dict, lang: str = "en") -> QuizQuestion:
     )
 
 
-def _generate_partizip(word: dict, lang: str = "en") -> QuizQuestion:
-    """Partizip II quiz: show translation, user types full stored Partizip II."""
-    partizip = word.get("partizip_ii")
-    if not partizip or not partizip.strip():
-        log_user_warning(
-            logger,
-            word.get("user_id", 0),
-            f"Partizip quiz for '{word['german']}' without partizip_ii, falling back to translate",
-        )
-        return _generate_translate(word, lang)
+def _generate_specific_verb_form(
+    word: dict,
+    form_key: str,
+    correct: str,
+    lang: str = "en",
+) -> QuizQuestion:
+    label = verb_form_label(form_key)
     prompt = (
-        f"Напиши Partizip II для: {word['translation']}"
+        f"Напиши форму '{label}' для '{word['german']}'"
         if normalize_language(lang) == "ru"
-        else f"Type the Partizip II for: {word['translation']}"
+        else f"What is the '{label}' form of '{word['german']}'?"
     )
     return QuizQuestion(
         word=word,
-        quiz_type="partizip",
+        quiz_type="verb_forms",
         prompt=prompt,
         options=None,
-        correct_answer=partizip,
+        correct_answer=correct,
+        verb_form_key=form_key,
     )
 
 
@@ -407,6 +438,79 @@ def build_quiz_session(
     )
 
 
+def generate_verb_revision_question(word: dict, lang: str = "en") -> QuizQuestion:
+    forms = all_verb_forms(word, parse_irregular_forms(word.get("irregular_forms")))
+    form_key = random.choice(list(forms.keys()))  # noqa: S311
+    correct, _is_irregular = forms[form_key]
+    return _generate_specific_verb_form(word, form_key, correct, lang)
+
+
+def build_verb_revision_session(
+    user_id: int,
+    due_verbs: list[dict],
+    size: int,
+    lang: str = "en",
+) -> QuizSession:
+    """Build a verb-only form revision session.
+
+    At least half the questions use stored irregular forms when enough such
+    forms are available. The rest can use generated regular forms, so regular
+    verbs are still useful in this mode.
+    """
+    if not due_verbs:
+        return QuizSession(user_id=user_id, questions=[], max_questions=0, lang=lang)
+
+    irregular: list[tuple[dict, str, str]] = []
+    regular: list[tuple[dict, str, str]] = []
+    for word in due_verbs:
+        stored = parse_irregular_forms(word.get("irregular_forms"))
+        for key, (value, is_irregular) in all_verb_forms(word, stored).items():
+            target = irregular if is_irregular else regular
+            target.append((word, key, value))
+
+    random.shuffle(irregular)
+    random.shuffle(regular)
+    target_irregular = min(len(irregular), (size + 1) // 2)
+    picked = irregular[:target_irregular]
+    rest = irregular[target_irregular:] + regular
+    random.shuffle(rest)
+    picked.extend(rest[: max(0, size - len(picked))])
+
+    while len(picked) < size and (irregular or regular):
+        pool = irregular if len(picked) % 2 == 0 and irregular else regular or irregular
+        picked.append(random.choice(pool))  # noqa: S311
+
+    random.shuffle(picked)
+    questions = [
+        _generate_specific_verb_form(word, key, value, lang) for word, key, value in picked[:size]
+    ]
+    return QuizSession(
+        user_id=user_id,
+        questions=questions,
+        lang=lang,
+        max_questions=size * MAX_QUIZ_SESSION_MULTIPLIER,
+        verb_revision=True,
+    )
+
+
+def format_verb_revision_cards(words: list[dict], lang: str = "en") -> str:
+    title = "Карточки глаголов" if normalize_language(lang) == "ru" else "Verb cards"
+    lines = [f"<b>{title}</b>"]
+    for word in words:
+        lines.append("")
+        lines.append(f"<b>{html.escape(word['german'])}</b> = {html.escape(word['translation'])}")
+        stored = parse_irregular_forms(word.get("irregular_forms"))
+        for key, (value, is_irregular) in all_verb_forms(word, stored).items():
+            marker = "*" if is_irregular else ""
+            lines.append(f"{html.escape(verb_form_label(key))}: {html.escape(value)}{marker}")
+    note = (
+        "\n* сохраненная нестандартная форма"
+        if normalize_language(lang) == "ru"
+        else "\n* stored irregular form"
+    )
+    return "\n".join(lines) + note
+
+
 def check_answer(question: QuizQuestion, user_answer: str) -> bool:
     """Check if the user's answer is correct."""
     if not question.correct_answer:
@@ -441,12 +545,8 @@ def format_summary(session: QuizSession) -> str:
         translation_safe = html.escape(word["translation"])
         if question.quiz_type == "verb_forms" and question.verb_form_key:
             answer_safe = html.escape(question.correct_answer)
-            form_safe = html.escape(question.verb_form_key)
+            form_safe = html.escape(verb_form_label(question.verb_form_key))
             lines.append(f"{mark} {german_safe} ({form_safe}) — {answer_safe}")
-        elif question.quiz_type == "partizip":
-            answer_safe = html.escape(question.correct_answer)
-            label = "Partizip II"
-            lines.append(f"{mark} {german_safe} ({label}) — {answer_safe}")
         elif question.quiz_type == "plural":
             answer_safe = html.escape(question.correct_answer)
             label = "мн. число" if lang == "ru" else "plural"

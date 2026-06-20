@@ -2,13 +2,13 @@
 
 Wortschatz is a Telegram bot for learning German vocabulary with active recall and spaced repetition. It was built as a practical pet project: small enough to run on a VPS, but complete enough to use every day for adding words, drilling new vocabulary, reviewing due cards, and tracking progress.
 
-The bot focuses on the parts of German that are easy to forget in a plain word list: noun articles and plurals, Partizip II, and irregular present-tense verb forms.
+The bot focuses on the parts of German that are easy to forget in a plain word list: noun articles and plurals, plus non-standard verb forms such as Partizip II, Präteritum, and irregular present-tense forms.
 
 ## What It Does
 
 - Adds vocabulary cards from Telegram, one word or a batch at a time.
-- Supports nouns, verbs, irregular verbs, adjectives, adverbs, and prepositions.
-- Keeps German-specific fields: articles, plurals, Partizip II, and irregular forms.
+- Supports nouns, verbs, irregular verbs, adjectives, adverbs, prepositions, and phrases/collocations.
+- Keeps German-specific fields: articles, plurals, and stored verb irregularities.
 - Separates first learning from long-term review:
   - `/learn` teaches new or forgotten words through a short drill.
   - `/quiz` reviews learned words when they are due by SM-2.
@@ -37,17 +37,21 @@ Examples:
 
 ```text
 n die Katze Katzen cat
-v machen hat gemacht to do
+n das Geld - money
+v machen to do
+v | bringen | p=hat gebracht | pr=brachte | to bring
 vi fahren ist gefahren fahre faehrst faehrt to drive
 adj schnell fast
 prep mit with (+dat)
+phrase | auf jeden Fall | in any case
 ```
 
 Pipe-separated input is also supported and is easier when translations contain spaces:
 
 ```text
 n | der Hund | Hunde | a friendly dog
-vi | fahren | ist gefahren | fahre | faehrst | faehrt | to drive
+v | fahren | p=ist gefahren | pr=fuhr | du=faehrst | er=faehrt | to drive
+phr | sich Mühe geben | to make an effort
 ```
 
 Tags can be attached to batches and later used for filtered lists, learning, and quizzes.
@@ -60,10 +64,10 @@ Tags can be attached to batches and later used for filtered lists, learning, and
 - Choose the translation in multiple choice.
 - Type the German word.
 - For nouns: article and plural when available.
-- For verbs: Partizip II, and irregular forms when available.
+- For adjectives: one generated form-in-context step, for example filling `ein ___ Mann`.
+- For verbs: Partizip II plus one present form for every verb; stored non-standard forms are also asked when available.
 
-Correct answers advance silently, so the chat stays clean. Wrong answers are folded into the next prompt and retried later in the same session. A failed step can be retried twice, for three total attempts. A word graduates only when all required steps pass.
-To keep Telegram readable, the bot edits the current step message for a short block of steps, then starts a fresh step message every 5 steps.
+Each learning step gets a fresh Telegram message, with old inline buttons removed. After an answer, the next message shows the previous word card before the next prompt; verb cards use a table-like form block. A failed step can be retried twice, for three total attempts. A word graduates only when all required steps pass.
 
 Blackout-rated words from `/quiz` return to `/learn`. In a normal learning session, Blackout words are tried before brand-new words, but they use at most half of the session.
 
@@ -75,10 +79,14 @@ Blackout-rated words from `/quiz` return to `/learn`. In a normal learning sessi
 - Pick the translation from multiple choice.
 - Choose `der`, `die`, or `das`.
 - Type the plural.
-- Type Partizip II.
-- Type irregular verb forms such as `du` or `er/sie/es`.
+- Fill an adjective form in a short generated phrase.
+- Type verb forms such as Partizip II, Präteritum, `du`, `wir`, or `sie/Sie`.
 
 After each answer, the bot shows a compact word card with the translation and relevant forms, then asks for a rating. The same bot message is edited into the next question, avoiding long runs of `Correct`, `Wrong`, and `Noted` messages.
+
+`/verbs [N] [tag]` is a focused verb revision mode. It first shows cards for the selected due verbs with generated regular forms and any stored irregular forms, then asks typed form questions. When enough irregular stored forms are available, at least half of the questions use them.
+
+Regular verb forms are generated for practice only and are not displayed on normal word cards. The generator covers common regular patterns, including `-ieren`, many inseparable prefixes, common separable prefixes, and `-d/-t` stems. Store a form explicitly with `p=...`, `pr=...`, `du=...`, etc. when a verb needs an exception such as `ist` instead of `hat`.
 
 ### Track Progress
 
@@ -118,7 +126,9 @@ For deeper web monitoring, the optional Docker `monitoring` profile starts:
 | `/add [tag]` | Add a batch of word cards |
 | `/learn [N] [tag]` | Learn new or Blackout words |
 | `/quiz [N] [tag]` | Review due words |
+| `/verbs [N] [tag]` | Review due verb forms |
 | `/stats` | Show today/week text stats and send a PNG activity chart |
+| `/today` | Show words learned and repeated today for AI follow-up practice |
 | `/health` | Show owner-only bot health |
 | `/language [en\|ru]` | Choose English or Russian interface |
 | `/list <tag>` | List words by tag |
@@ -136,14 +146,35 @@ Supported card formats:
 
 ```text
 n <article> <word> <plural> <translation>
-v <infinitive> <partizip_ii> <translation>
-vi <infinitive> <partizip_ii> <ich> <du> <er/sie/es> <translation>
+v <infinitive> <translation>
+v | <infinitive> | p=<Partizip II> | pr=<Präteritum> | du=<form> | er=<form> | <translation>
+vi <infinitive> <partizip_ii> <ich> <du> <er/sie/es> <translation>  # legacy format
 adj <word> <translation>
 adv <word> <translation>
 prep <word> <translation>
+phrase <single-token-expression> <translation>
+phr | <expression> | <translation>
 ```
 
-The `vi` marker is used for irregular verbs so that multi-word translations do not conflict with verb forms.
+Use short form keys for non-standard verb forms: `p` = Partizip II, `pr` = Präteritum, plus person keys such as `ich`, `du`, and `er`. Pipe-separated input is recommended for multi-word forms like `p=hat gebracht`. The older positional `vi` format is still accepted and is migrated into the same `irregular_forms` JSON storage.
+
+For nouns that do not have a normal plural form, use `-` in the plural field, for example `n das Geld - money` or `n | die | Bildung | - | education`. The bot stores that as no plural and skips plural questions for the card.
+
+For simple irregular Präteritum, `pr=` is enough:
+
+```text
+v | rufen | p=hat gerufen | pr=rief | to call
+```
+
+For verbs with forms you want to drill separately, add person-specific Präteritum keys:
+
+```text
+v | sein | p=ist gewesen | pr_ich=war | pr_du=warst | pr_er=war | pr_wir=waren | pr_ihr=wart | pr_sie=waren | to be
+```
+
+Those are stored in `irregular_forms` as keys such as `preteritum_du`, shown on cards, and used by `/learn`, `/quiz`, and `/verbs` as separate typed questions.
+
+If you add an existing word again with new non-conflicting forms, the bot merges the new form keys into the existing card. If the same form key already exists with a different value, the word is skipped and the confirmation message lists it under form conflicts.
 
 Umlaut matching is directional:
 

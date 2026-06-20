@@ -26,6 +26,7 @@ from bot.i18n import (
 )
 from bot.logging_config import get_logger, log_user_action, log_user_error
 from bot.stats import build_stats_chart_file, get_user_stats
+from bot.today import get_today_progress
 
 from ._shared import (
     CB_HELP,
@@ -205,7 +206,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     words = words[:LIST_MAX_WORDS]
     safe_tag = html.escape(tag)
     text = t("list_header", lang, tag=safe_tag, total=total)
-    text += _format_word_tables(words, lang=lang)
+    text += _format_word_tables(words, show_ids=False, lang=lang)
     if truncated:
         text += f"\n\n{t('list_more', lang, count=total - LIST_MAX_WORDS)}"
 
@@ -281,6 +282,15 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     chart = await build_stats_chart_file(conn, user_id, lang=lang)
     caption = "График активности" if lang == "ru" else "Activity chart"
     await update.message.reply_photo(photo=chart, caption=caption)
+
+
+async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    log_user_action(logger, user_id, "/today")
+    conn = _get_conn(context)
+    lang = await _get_lang(context, user_id)
+    text = await get_today_progress(conn, user_id, lang=lang)
+    await update.message.reply_text(text, parse_mode="HTML")
 
 
 async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

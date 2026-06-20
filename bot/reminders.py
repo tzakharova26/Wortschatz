@@ -22,9 +22,12 @@ logger = get_logger(__name__)
 
 DEFAULT_TZ = "Europe/Berlin"
 DISPLAY_ZONES = ["Europe/Berlin", "Europe/Moscow"]
-REMINDER_MESSAGE = "Time to practice German! Send /quiz to revise or /learn for new words."
+REMINDER_MESSAGE = (
+    "Time to practice German! Send /quiz to revise, /verbs for verb forms, "
+    "or /learn for new words."
+)
 REMINDER_KEYBOARD = ReplyKeyboardMarkup(
-    [["/add", "/quiz", "/learn"]],
+    [["/add", "/quiz", "/verbs", "/learn"]],
     resize_keyboard=True,
     one_time_keyboard=True,
     input_field_placeholder="Choose a practice command",
@@ -67,7 +70,8 @@ async def _reminder_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
         if conn is not None:
             lang = await get_user_language(conn, user_id)
         text = (
-            "Пора позаниматься немецким. Нажми /quiz для повторения или /learn для новых слов."
+            "Пора позаниматься немецким. Нажми /quiz для повторения, "
+            "/verbs для форм глаголов или /learn для новых слов."
             if lang == "ru"
             else REMINDER_MESSAGE
         )

@@ -1,5 +1,7 @@
 """Tests for bot/handlers/add.py — /add conversation flow and _save_words."""
 
+import json
+
 from bot.database import add_word, get_words
 from bot.handlers import (
     ADD_CONFIRM,
@@ -176,6 +178,80 @@ class TestAddConversation:
 
         text = upd.callback_query.message.reply_text.call_args.args[0]
         assert "Already existed" in text
+
+    async def test_add_existing_verb_merges_new_forms(self, fake_update, fake_context, db):
+        await add_word(
+            db,
+            12345,
+            "v",
+            "rufen",
+            "to call",
+            irregular_forms={"partizip_ii": "hat gerufen", "preteritum": "rief"},
+        )
+
+        fake_context.user_data["add_tag"] = ""
+        fake_context.user_data["parsed_words"] = [
+            {
+                "part_of_speech": "v",
+                "german": "rufen",
+                "translation": "to call",
+                "article": None,
+                "plural": None,
+                "irregular_forms": {
+                    "preteritum_du": "riefst",
+                    "preteritum_ihr": "rieft",
+                },
+            }
+        ]
+        upd = fake_update(callback_data="add:confirm")
+        await add_callback(upd, fake_context)
+
+        words = await get_words(db, 12345)
+        assert len(words) == 1
+        forms = json.loads(words[0]["irregular_forms"])
+        assert forms["partizip_ii"] == "hat gerufen"
+        assert forms["preteritum"] == "rief"
+        assert forms["preteritum_du"] == "riefst"
+        assert forms["preteritum_ihr"] == "rieft"
+        text = upd.callback_query.message.reply_text.call_args.args[0]
+        assert "Updated" in text
+        assert "Präteritum du" in text
+
+    async def test_add_existing_verb_conflicting_form_is_skipped(
+        self, fake_update, fake_context, db
+    ):
+        await add_word(
+            db,
+            12345,
+            "v",
+            "rufen",
+            "to call",
+            tags="old",
+            irregular_forms={"preteritum": "rief"},
+        )
+
+        fake_context.user_data["add_tag"] = "new"
+        fake_context.user_data["parsed_words"] = [
+            {
+                "part_of_speech": "v",
+                "german": "rufen",
+                "translation": "to call",
+                "article": None,
+                "plural": None,
+                "irregular_forms": {"preteritum": "rufte", "preteritum_du": "riefst"},
+            }
+        ]
+        upd = fake_update(callback_data="add:confirm")
+        await add_callback(upd, fake_context)
+
+        words = await get_words(db, 12345)
+        assert len(words) == 1
+        assert words[0]["tags"] == "old"
+        assert json.loads(words[0]["irregular_forms"]) == {"preteritum": "rief"}
+        text = upd.callback_query.message.reply_text.call_args.args[0]
+        assert "Form conflicts" in text
+        assert "rufen" in text
+        assert "Präteritum" in text
 
     async def test_homograph_different_pos_creates_new_row(self, fake_update, fake_context, db):
         """'laut' as adj (loud) and as noun (sound) are different words."""

@@ -10,14 +10,22 @@ from bot.config import (
     QUIZ_START_MESSAGE,
     QUIZ_TYPE_WEIGHTS,
 )
+from bot.questions import (
+    adjective_form,
+    all_verb_forms,
+    regular_verb_forms,
+    stored_verb_forms_for_questions,
+)
 from bot.quiz import (
     QuizQuestion,
     QuizSession,
     _word_score,
     apply_results,
     build_quiz_session,
+    build_verb_revision_session,
     check_answer,
     format_summary,
+    format_verb_revision_cards,
     generate_question,
     select_quiz_type,
 )
@@ -41,7 +49,6 @@ def _make_word(
         "german": german,
         "article": article,
         "plural": plural,
-        "partizip_ii": None,
         "irregular_forms": json.dumps(irregular_forms) if irregular_forms else None,
         "translation": translation,
         "tags": tags,
@@ -50,7 +57,17 @@ def _make_word(
 
 
 def _make_verb(word_id=2, irregular=True):
-    forms = {"ich": "fahre", "du": "f\u00e4hrst", "er": "f\u00e4hrt"} if irregular else None
+    forms = (
+        {
+            "partizip_ii": "ist gefahren",
+            "preteritum": "fuhr",
+            "ich": "fahre",
+            "du": "f\u00e4hrst",
+            "er": "f\u00e4hrt",
+        }
+        if irregular
+        else None
+    )
     word = _make_word(
         word_id=word_id,
         pos="v",
@@ -60,7 +77,6 @@ def _make_verb(word_id=2, irregular=True):
         plural=None,
         irregular_forms=forms,
     )
-    word["partizip_ii"] = "ist gefahren"
     return word
 
 
@@ -106,7 +122,6 @@ class TestConfigConstants:
     def test_quiz_type_weights(self):
         assert QUIZ_TYPE_WEIGHTS["translate"] == 1.0
         assert QUIZ_TYPE_WEIGHTS["verb_forms"] == 0.9
-        assert QUIZ_TYPE_WEIGHTS["partizip"] == 0.8
         assert QUIZ_TYPE_WEIGHTS["multiple_choice"] == 0.6
         assert QUIZ_TYPE_WEIGHTS["article"] == 0.5
 
@@ -164,11 +179,11 @@ class TestSelectQuizType:
         for _ in range(50):
             assert select_quiz_type(word) != "plural"
 
-    def test_regular_verb_has_partizip_but_no_verb_forms(self):
+    def test_regular_verb_can_get_form_questions(self):
         word = _make_verb(irregular=False)
         types_seen = {select_quiz_type(word) for _ in range(100)}
-        assert types_seen <= {"translate", "multiple_choice", "partizip"}
-        assert "partizip" in types_seen
+        assert types_seen <= {"translate", "multiple_choice", "verb_forms"}
+        assert "verb_forms" in types_seen
 
     def test_irregular_verb_can_get_verb_forms(self):
         word = _make_verb(irregular=True)
@@ -176,13 +191,12 @@ class TestSelectQuizType:
         for _ in range(100):
             types_seen.add(select_quiz_type(word))
         assert "verb_forms" in types_seen
-        assert "partizip" in types_seen
 
     def test_adjective_types(self):
         word = _make_adj()
         for _ in range(50):
             qt = select_quiz_type(word)
-            assert qt in ("translate", "multiple_choice")
+            assert qt in ("translate", "multiple_choice", "adjective_example")
 
     def test_adverb_types(self):
         word = _make_adv()
@@ -355,13 +369,23 @@ class TestGenerateQuestion:
         word = _make_verb(irregular=True)
         random.seed(42)
         q = generate_question(word, "verb_forms", [word])
-        assert q.verb_form_key in ("ich", "du", "er")
-        assert q.correct_answer in ("fahre", "f\u00e4hrst", "f\u00e4hrt")
+        assert q.verb_form_key in (
+            "partizip_ii",
+            "preteritum",
+            "ich",
+            "du",
+            "er",
+            "wir",
+            "ihr",
+            "sie",
+        )
+        assert q.correct_answer
 
-    def test_verb_forms_no_forms_falls_back(self):
+    def test_regular_verb_forms_quiz_uses_generated_forms(self):
         word = _make_verb(irregular=False)
         q = generate_question(word, "verb_forms", [word])
-        assert q.quiz_type == "translate"
+        assert q.quiz_type == "verb_forms"
+        assert q.correct_answer
 
     def test_verb_forms_empty_value_falls_back(self):
         word = _make_word(
@@ -369,26 +393,162 @@ class TestGenerateQuestion:
         )
         word["irregular_forms"] = json.dumps({"ich": ""})
         q = generate_question(word, "verb_forms", [word])
-        assert q.quiz_type == "translate"  # empty form value
+        assert q.quiz_type == "verb_forms"  # empty stored form is ignored; generated forms remain
 
-    def test_partizip_quiz(self):
-        word = _make_verb(irregular=False)
-        q = generate_question(word, "partizip", [word])
-        assert q.quiz_type == "partizip"
-        assert q.options is None
-        assert q.correct_answer == "ist gefahren"
-        assert "Partizip II" in q.prompt
-
-    def test_partizip_quiz_no_partizip_falls_back(self):
-        word = _make_verb(irregular=False)
-        word["partizip_ii"] = None
-        q = generate_question(word, "partizip", [word])
-        assert q.quiz_type == "translate"
+    def test_adjective_example_quiz(self):
+        word = _make_adj()
+        random.seed(1)
+        q = generate_question(word, "adjective_example", [word])
+        assert q.quiz_type == "adjective_example"
+        assert "___" in q.prompt
+        assert q.correct_answer in {"schnelle", "schneller", "schnelles", "schnellen"}
 
     def test_unknown_quiz_type_falls_back(self):
         word = _make_word()
         q = generate_question(word, "unknown_type", [word])
         assert q.quiz_type == "translate"
+
+
+class TestVerbRevision:
+    def test_regular_verb_forms_generated(self):
+        assert regular_verb_forms("machen") == {
+            "partizip_ii": "hat gemacht",
+            "ich": "mache",
+            "du": "machst",
+            "er": "macht",
+            "wir": "machen",
+            "ihr": "macht",
+            "sie": "machen",
+        }
+        assert regular_verb_forms("arbeiten") == {
+            "partizip_ii": "hat gearbeitet",
+            "ich": "arbeite",
+            "du": "arbeitest",
+            "er": "arbeitet",
+            "wir": "arbeiten",
+            "ihr": "arbeitet",
+            "sie": "arbeiten",
+        }
+        assert regular_verb_forms("studieren")["partizip_ii"] == "hat studiert"
+
+    def test_reflexive_regular_verb_forms_generated(self):
+        assert regular_verb_forms("sich erinnern") == {
+            "partizip_ii": "hat sich erinnert",
+            "ich": "erinnere mich",
+            "du": "erinnerst dich",
+            "er": "erinnert sich",
+            "wir": "erinnern uns",
+            "ihr": "erinnert euch",
+            "sie": "erinnern sich",
+        }
+
+    def test_regular_verb_with_trailing_preposition_generated(self):
+        assert regular_verb_forms("warten auf") == {
+            "partizip_ii": "hat gewartet",
+            "ich": "warte auf",
+            "du": "wartest auf",
+            "er": "wartet auf",
+            "wir": "warten auf",
+            "ihr": "wartet auf",
+            "sie": "warten auf",
+        }
+
+    def test_separable_regular_verb_forms_generated(self):
+        assert regular_verb_forms("aufmachen") == {
+            "partizip_ii": "hat aufgemacht",
+            "ich": "mache auf",
+            "du": "machst auf",
+            "er": "macht auf",
+            "wir": "machen auf",
+            "ihr": "macht auf",
+            "sie": "machen auf",
+        }
+
+    def test_reflexive_separable_regular_verb_forms_generated(self):
+        assert regular_verb_forms("sich anmelden") == {
+            "partizip_ii": "hat sich angemeldet",
+            "ich": "melde mich an",
+            "du": "meldest dich an",
+            "er": "meldet sich an",
+            "wir": "melden uns an",
+            "ihr": "meldet euch an",
+            "sie": "melden sich an",
+        }
+
+    def test_reflexive_verb_with_trailing_preposition_generated(self):
+        assert regular_verb_forms("sich freuen auf") == {
+            "partizip_ii": "hat sich gefreut",
+            "ich": "freue mich auf",
+            "du": "freust dich auf",
+            "er": "freut sich auf",
+            "wir": "freuen uns auf",
+            "ihr": "freut euch auf",
+            "sie": "freuen sich auf",
+        }
+
+    def test_adjective_form_generation(self):
+        assert adjective_form("schnell", "er") == "schneller"
+        assert adjective_form("leise", "e") == "leise"
+        assert adjective_form("dunkel", "e") == "dunkle"
+        assert adjective_form("teuer", "es") == "teures"
+
+    def test_stored_forms_override_regular_generated_forms(self):
+        word = _make_verb(irregular=True)
+        forms = all_verb_forms(word, json.loads(word["irregular_forms"]))
+        assert forms["partizip_ii"] == ("ist gefahren", True)
+        assert forms["preteritum"] == ("fuhr", True)
+
+    def test_person_specific_preteritum_forms_are_ordered_for_questions(self):
+        forms = stored_verb_forms_for_questions(
+            {
+                "preteritum_du": "warst",
+                "partizip_ii": "ist gewesen",
+                "preteritum_ich": "war",
+                "preteritum_er": "war",
+            }
+        )
+        assert list(forms) == [
+            "partizip_ii",
+            "preteritum_ich",
+            "preteritum_du",
+            "preteritum_er",
+        ]
+
+    def test_verb_revision_prefers_irregular_half_when_available(self):
+        irregular = _make_verb(word_id=1, irregular=True)
+        regular = _make_word(
+            word_id=2,
+            pos="v",
+            german="machen",
+            translation="to do",
+            article=None,
+            plural=None,
+        )
+        session = build_verb_revision_session(12345, [irregular, regular], size=6)
+        irregular_questions = [
+            q
+            for q in session.questions
+            if q.word["id"] == irregular["id"]
+            and q.verb_form_key in json.loads(irregular["irregular_forms"])
+        ]
+        assert len(session.questions) == 6
+        assert len(irregular_questions) >= 3
+        assert {q.quiz_type for q in session.questions} == {"verb_forms"}
+        assert session.verb_revision is True
+
+    def test_verb_revision_cards_show_regular_and_irregular_forms(self):
+        regular = _make_word(
+            word_id=3,
+            pos="v",
+            german="machen",
+            translation="to do",
+            article=None,
+            plural=None,
+        )
+        text = format_verb_revision_cards([_make_verb(irregular=True), regular])
+        assert "Partizip II: ist gefahren*" in text
+        assert "Präteritum: fuhr*" in text
+        assert "Partizip II: hat gemacht" in text
 
 
 # --- Check answer ---

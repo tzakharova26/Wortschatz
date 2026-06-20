@@ -2,7 +2,8 @@
 
 Distinct from /quiz: each word gets a rapid-fire massed drill — show the card,
 then recognize via multiple choice, then produce via typed answer, then any
-POS-specific extras (article for nouns, two verb forms for irregular verbs).
+POS-specific extras: article/plural for nouns, generated adjective context
+forms, and generated/stored verb forms.
 
 Wrong steps are retried up to two times at the end of the session.
 A word graduates only if every required step passes within those attempts.
@@ -27,9 +28,13 @@ from bot.database import (
 from bot.i18n import normalize_language
 from bot.logging_config import get_logger, log_user_action, log_user_error
 from bot.questions import (
+    adjective_example_question,
+    all_verb_forms,
     german_with_article,
     is_correct,
     multiple_choice_options,
+    stored_verb_forms_for_questions,
+    verb_form_label,
 )
 from bot.sm2 import QUALITY_CORRECT, calculate_sm2, sm2_from_db
 
@@ -41,11 +46,9 @@ MC = "multiple_choice"
 TYPED = "typed"
 ARTICLE = "article"
 PLURAL = "plural"
-PARTIZIP = "partizip"
 VERB_FORM = "verb_form"
+ADJECTIVE_EXAMPLE = "adjective_example"
 
-# Drill this many distinct verb forms (out of ich/du/er) for irregular verbs.
-LEARN_VERB_FORMS_COUNT = 2
 MAX_STEP_ATTEMPTS = 3
 
 
@@ -146,7 +149,11 @@ class LearnSession:
 
 
 def _show_prompt(word: dict) -> str:
-    """Render the full card for the SHOW step. HTML-escaped, monospace-friendly."""
+    return format_word_card(word)
+
+
+def format_word_card(word: dict) -> str:
+    """Render a full word card. HTML-escaped, with verb forms in a readable block."""
     pos = word["part_of_speech"]
     lines: list[str] = []
     german_safe = html.escape(word["german"])
@@ -158,13 +165,17 @@ def _show_prompt(word: dict) -> str:
         lines.append(f"plural: {html.escape(plural)}")
     elif pos == "v":
         lines.append(f"<b>{german_safe}</b>")
-        partizip = word.get("partizip_ii")
-        if partizip:
-            lines.append(f"partizip II: {html.escape(partizip)}")
         forms = parse_irregular_forms(word.get("irregular_forms"))
         if forms:
-            forms_str = ", ".join(f"{html.escape(k)}: {html.escape(v)}" for k, v in forms.items())
-            lines.append(f"forms: {forms_str}")
+            form_items = [
+                (verb_form_label(k), str(v))
+                for k, v in stored_verb_forms_for_questions(forms).items()
+                if v
+            ]
+            if form_items:
+                width = max(len(label) for label, _value in form_items)
+                table = "\n".join(f"{label.ljust(width)} : {value}" for label, value in form_items)
+                lines.append("<pre>" + html.escape(table) + "</pre>")
     else:
         lines.append(f"<b>{german_safe}</b>")
 
@@ -249,41 +260,56 @@ def _build_plural_step(word: dict, lang: str = "en") -> LearnStep:
     )
 
 
-def _build_partizip_step(word: dict, lang: str = "en") -> LearnStep:
-    prompt = (
-        f"Напиши Partizip II для: {word['translation']}"
-        if normalize_language(lang) == "ru"
-        else f"Type the Partizip II for: {word['translation']}"
-    )
-    return LearnStep(
-        word=word,
-        step_type=PARTIZIP,
-        prompt=prompt,
-        options=None,
-        correct_answer=word["partizip_ii"],
-    )
-
-
 def _build_verb_form_steps(word: dict, lang: str = "en") -> list[LearnStep]:
-    forms = parse_irregular_forms(word.get("irregular_forms")) or {}
-    usable = [(k, v) for k, v in forms.items() if v]
-    random.shuffle(usable)
-    picked = usable[:LEARN_VERB_FORMS_COUNT]
+    stored = parse_irregular_forms(word.get("irregular_forms"))
+    forms = all_verb_forms(word, stored)
+    stored_present_keys = [
+        key for key in ("ich", "du", "er", "wir", "ihr", "sie") if stored and stored.get(key)
+    ]
+    present_keys = stored_present_keys or [
+        key for key in ("ich", "du", "er", "wir", "ihr", "sie") if key in forms
+    ]
+    selected: list[tuple[str, str]] = []
+    if "partizip_ii" in forms:
+        selected.append(("partizip_ii", forms["partizip_ii"][0]))
+    if present_keys:
+        key = random.choice(present_keys)  # noqa: S311
+        selected.append((key, forms[key][0]))
+    for key, value in stored_verb_forms_for_questions(stored).items():
+        if key not in {selected_key for selected_key, _value in selected}:
+            selected.append((key, value))
     return [
         LearnStep(
             word=word,
             step_type=VERB_FORM,
             prompt=(
-                f"Напиши форму '{k}' для '{word['german']}'"
+                f"Напиши форму '{verb_form_label(k)}' для '{word['german']}'"
                 if normalize_language(lang) == "ru"
-                else f"Type the '{k}' form of '{word['german']}'"
+                else f"Type the '{verb_form_label(k)}' form of '{word['german']}'"
             ),
             options=None,
             correct_answer=v,
             verb_form_key=k,
         )
-        for k, v in picked
+        for k, v in selected
+        if v
     ]
+
+
+def _build_adjective_example_step(word: dict, lang: str = "en") -> LearnStep:
+    phrase, correct = adjective_example_question(word["german"])
+    prompt = (
+        f"Вставь форму прилагательного '{word['german']}':\n{phrase}"
+        if normalize_language(lang) == "ru"
+        else f"Fill in the adjective form for '{word['german']}':\n{phrase}"
+    )
+    return LearnStep(
+        word=word,
+        step_type=ADJECTIVE_EXAMPLE,
+        prompt=prompt,
+        options=None,
+        correct_answer=correct,
+    )
 
 
 def _interleave_steps(per_word: list[list[LearnStep]]) -> list[LearnStep]:
@@ -347,13 +373,12 @@ def build_session(
                 word_steps.append(_build_plural_step(w, lang))
                 word_required.add(PLURAL)
         elif w["part_of_speech"] == "v":
-            if w.get("partizip_ii") and w["partizip_ii"].strip():
-                word_steps.append(_build_partizip_step(w, lang))
-                word_required.add(PARTIZIP)
-
-        for vs in _build_verb_form_steps(w, lang):
-            word_steps.append(vs)
-            word_required.add(f"{VERB_FORM}:{vs.verb_form_key}")
+            for vs in _build_verb_form_steps(w, lang):
+                word_steps.append(vs)
+                word_required.add(f"{VERB_FORM}:{vs.verb_form_key}")
+        elif w["part_of_speech"] == "adj":
+            word_steps.append(_build_adjective_example_step(w, lang))
+            word_required.add(ADJECTIVE_EXAMPLE)
 
         per_word_steps.append(word_steps)
         required[word_id] = word_required

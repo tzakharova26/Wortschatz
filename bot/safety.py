@@ -110,7 +110,6 @@ def validate_word_lengths(word: dict) -> None:
         ("German word", word.get("german") or "", MAX_GERMAN_LENGTH),
         ("Translation", word.get("translation") or "", MAX_TRANSLATION_LENGTH),
         ("Plural", word.get("plural") or "", MAX_GERMAN_LENGTH),
-        ("Partizip II", word.get("partizip_ii") or "", MAX_GERMAN_LENGTH),
     ]
     forms = word.get("irregular_forms") or {}
     if isinstance(forms, dict):

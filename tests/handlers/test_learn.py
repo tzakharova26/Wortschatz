@@ -342,7 +342,7 @@ class TestLearnConversation:
         # Step 1: SHOW → tap "Got it" (correct). Next render shows step 2 of 3.
         upd_show = fake_update(callback_data="lshow:ok")
         await learn_button_answer(upd_show, fake_context)
-        text_after_show = fake_context.user_data["learn_message"].edit_text.call_args.args[0]
+        text_after_show = upd_show.callback_query.message.reply_text.call_args.args[0]
         assert "Step 2/3" in text_after_show
 
         # Step 2: MC → wrong → counter must show 4 because retry is queued.
@@ -350,11 +350,12 @@ class TestLearnConversation:
         wrong_choice = next(o for o in mc_step.options if o != mc_step.correct_answer)
         upd_mc = fake_update(callback_data=f"lmc:{wrong_choice}")
         await learn_button_answer(upd_mc, fake_context)
-        text_after_wrong = fake_context.user_data["learn_message"].edit_text.call_args.args[0]
+        text_after_wrong = upd_mc.callback_query.message.reply_text.call_args.args[0]
         assert (
             "Step 3/4" in text_after_wrong
         ), f"Counter should grow on wrong answer; got: {text_after_wrong!r}"
         assert "Try this one again later" in text_after_wrong
+        assert "Previous word" in text_after_wrong
 
     async def test_learn_cancel_persists_partial_graduation(self, fake_update, fake_context, db):
         """If a word fully graduated before cancel, its graduation must persist."""

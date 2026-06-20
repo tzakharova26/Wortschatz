@@ -24,11 +24,14 @@ from bot.database import (
     count_words,
     find_word_by_german_pos,
     get_tags,
+    merge_irregular_forms,
     merge_tag,
+    update_word_irregular_forms,
     update_word_tags,
 )
 from bot.i18n import add_format_message, normalize_language
 from bot.logging_config import get_logger, log_user_action, log_user_error, log_user_warning
+from bot.questions import verb_form_label
 from bot.safety import (
     LimitExceeded,
     ensure_db_size_allows_write,
@@ -298,7 +301,7 @@ async def add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
 async def _save_words(update, context, parsed, conn, user_id, tag) -> int:
     """Save parsed words. If a word with same (german, POS) already exists,
-    merge the new tag into its existing tags instead of creating a duplicate row."""
+    merge non-conflicting new forms/tags instead of creating a duplicate row."""
     try:
         await _validate_save_limits(conn, user_id, parsed, tag)
     except LimitExceeded as e:
@@ -308,8 +311,9 @@ async def _save_words(update, context, parsed, conn, user_id, tag) -> int:
         return ConversationHandler.END
 
     added = []  # newly inserted
-    merged = []  # existing word, tag added
+    merged = []  # existing word, tag/forms added
     unchanged = []  # existing word, tag already present (or no tag given)
+    conflicts = []  # existing word had incompatible form values and was ignored
 
     for w in parsed:
         try:
@@ -317,15 +321,39 @@ async def _save_words(update, context, parsed, conn, user_id, tag) -> int:
                 conn, user_id, w["german"], w["part_of_speech"]
             )
             if existing is not None:
-                new_tags, changed = merge_tag(existing["tags"], tag)
-                if changed:
+                merged_forms, forms_changed, form_conflicts = merge_irregular_forms(
+                    existing.get("irregular_forms"),
+                    w.get("irregular_forms"),
+                )
+                if form_conflicts:
+                    w["id"] = existing["id"]
+                    w["tags"] = existing["tags"]
+                    w["form_conflicts"] = form_conflicts
+                    conflicts.append(w)
+                    conflict_keys = ", ".join(form_conflicts)
+                    log_user_warning(
+                        logger,
+                        user_id,
+                        f"Ignored duplicate word with conflicting forms: "
+                        f"{_safe_log(w['german'])}, keys={_safe_log(conflict_keys)}",
+                    )
+                    continue
+
+                new_tags, tag_changed = merge_tag(existing["tags"], tag)
+                if tag_changed:
                     await update_word_tags(conn, user_id, existing["id"], new_tags)
+                if forms_changed:
+                    await update_word_irregular_forms(conn, user_id, existing["id"], merged_forms)
+
+                if tag_changed or forms_changed:
                     w["id"] = existing["id"]
                     w["tags"] = new_tags
+                    w["irregular_forms"] = merged_forms
                     merged.append(w)
                 else:
                     w["id"] = existing["id"]
                     w["tags"] = existing["tags"]
+                    w["irregular_forms"] = existing.get("irregular_forms")
                     unchanged.append(w)
                 continue
 
@@ -368,14 +396,24 @@ async def _save_words(update, context, parsed, conn, user_id, tag) -> int:
         )
     if merged:
         safe_tag = html.escape(tag)
-        parts.append(
-            (
-                f"Тег <b>#{safe_tag}</b> добавлен к существующим словам: {len(merged)}:"
+        if tag:
+            merged_header = (
+                f"Теги/формы обновлены у существующих слов: {len(merged)}:"
                 if lang == "ru"
-                else f"Tag <b>#{safe_tag}</b> added to {len(merged)} existing word(s):"
+                else f"Updated {len(merged)} existing word(s) with new tag/forms:"
             )
+        else:
+            merged_header = (
+                f"Формы обновлены у существующих слов: {len(merged)}:"
+                if lang == "ru"
+                else f"Updated {len(merged)} existing word(s) with new forms:"
+            )
+        parts.append(
+            (merged_header if not tag else merged_header + f" <b>#{safe_tag}</b>")
             + _format_word_tables(merged, show_ids=False, lang=lang)
         )
+    if conflicts:
+        parts.append(_format_conflict_summary(conflicts, lang))
     if unchanged:
         names = ", ".join(html.escape(w["german"]) for w in unchanged)
         parts.append(
@@ -416,6 +454,25 @@ async def _save_words(update, context, parsed, conn, user_id, tag) -> int:
 
     _clear_add_state(context)
     return ConversationHandler.END
+
+
+def _format_conflict_summary(words: list[dict], lang: str) -> str:
+    lines = [
+        "<b>Конфликты форм, слова пропущены:</b>"
+        if lang == "ru"
+        else "<b>Form conflicts, word(s) skipped:</b>"
+    ]
+    for word in words:
+        conflict_labels = ", ".join(
+            html.escape(verb_form_label(key)) for key in word.get("form_conflicts", {})
+        )
+        lines.append(f"  {html.escape(word['german'])}: {conflict_labels}")
+    lines.append(
+        "Для одной и той же формы были указаны разные значения."
+        if lang == "ru"
+        else "Several values were provided for the same stored form."
+    )
+    return "\n".join(lines)
 
 
 async def _validate_save_limits(conn, user_id: int, parsed: list[dict], tag: str) -> None:

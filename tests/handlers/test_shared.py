@@ -34,13 +34,17 @@ class TestFormatWordTables:
         assert "[1]" in text
 
     def test_verbs_with_forms(self):
-        forms = {"ich": "fahre", "du": "fährst", "er": "fährt"}
+        forms = {
+            "partizip_ii": "ist gefahren",
+            "ich": "fahre",
+            "du": "fährst",
+            "er": "fährt",
+        }
         words = [
             {
                 "id": 2,
                 "part_of_speech": "v",
                 "german": "fahren",
-                "partizip_ii": "ist gefahren",
                 "translation": "to drive",
                 "irregular_forms": json.dumps(forms),
             }
@@ -58,14 +62,13 @@ class TestFormatWordTables:
                 "id": 3,
                 "part_of_speech": "v",
                 "german": "machen",
-                "partizip_ii": "hat gemacht",
                 "translation": "to do",
                 "irregular_forms": None,
             }
         ]
         text = _format_word_tables(words)
         assert "machen" in text
-        assert "hat gemacht" in text
+        assert "to do" in text
 
     def test_adjectives(self):
         words = [
